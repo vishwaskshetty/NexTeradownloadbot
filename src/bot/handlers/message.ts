@@ -42,7 +42,7 @@ export const messageHandler = async (ctx: Context) => {
     // 2. Check Active Job Limit (1 active job per user)
     const activeJob = await jobService.getActiveJob(user.id);
     if (activeJob) {
-      await ctx.reply('⏳ *ACTIVE DOWNLOAD*\n\nYou already have a download being processed.\n\nPlease wait until it finishes before starting another one.', { parse_mode: 'Markdown' });
+      await ctx.reply('⏳ *You already have a download in progress. Please wait until it is completed.*', { parse_mode: 'Markdown' });
       return;
     }
 

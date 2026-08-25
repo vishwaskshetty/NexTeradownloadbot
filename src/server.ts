@@ -14,34 +14,35 @@ app.use(cookieParser());
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'admin', 'views'));
 
-// Railway & System Health check endpoint
-app.get('/health', async (req, res) => {
-  let dbStatus = 'ok';
-  let redisStatus = 'ok';
+// GET /health - Simple HTTP 200 process liveness check for Railway
+app.get('/health', (req, res) => {
+  return res.status(200).json({
+    status: 'ok',
+    bot: 'online'
+  });
+});
+
+// GET /ready - Dependency readiness health report (PostgreSQL & Redis status)
+app.get('/ready', async (req, res) => {
+  let dbStatus = false;
+  let redisStatus = false;
 
   try {
     const { db } = require('./db');
     await db.$queryRaw`SELECT 1`;
-  } catch (e) {
-    dbStatus = 'error';
-  }
+    dbStatus = true;
+  } catch (e) {}
 
   try {
     const { redis } = require('./redis');
     await redis.ping();
-  } catch (e) {
-    redisStatus = 'error';
-  }
+    redisStatus = true;
+  } catch (e) {}
 
-  const isHealthy = dbStatus === 'ok' && redisStatus === 'ok';
-  return res.status(isHealthy ? 200 : 500).json({
-    status: isHealthy ? 'ok' : 'degraded',
-    timestamp: new Date().toISOString(),
-    services: {
-      database: dbStatus,
-      redis: redisStatus,
-      server: 'ok'
-    }
+  return res.status(200).json({
+    bot: true,
+    postgres: dbStatus,
+    redis: redisStatus
   });
 });
 
@@ -88,6 +89,6 @@ app.get('/verify/:token', async (req, res) => {
 
 export const startServer = (port: number = 3000) => {
   return app.listen(port, '0.0.0.0', () => {
-    logger.info(`🌐 Webhook & Admin server listening on 0.0.0.0:${port}`);
+    logger.info(`🌐 Server listening on 0.0.0.0:${port}`);
   });
 };
