@@ -215,7 +215,7 @@ export class TeraBoxResolver {
       throw new InvalidUrlError('❌ Unsupported TeraBox link');
     }
 
-    logger.info(`[TeraBox] Resolving share URL code: ${shareCode}`);
+    logger.info(`[TeraBox] Share code resolved: ${shareCode}`);
 
     // Check cache
     const cacheKey = `terabox:meta_list:${shareCode}`;
@@ -285,6 +285,7 @@ export class TeraBoxResolver {
       throw new NotFoundError('❌ File is unavailable or private');
     }
 
+    logger.info(`[TeraBox] Number of files found: ${fileList.length}`);
     const firstFile = fileList[0];
     logger.info(`[TeraBox] File identified: "${firstFile.server_filename || firstFile.filename}" (Expected size: ${firstFile.size || 'unknown'})`);
 
@@ -319,33 +320,51 @@ export class TeraBoxResolver {
       throw new NotFoundError('❌ File is unavailable or private');
     }
 
+    logger.info(`[TeraBox] Selected fs_id: ${file.fs_id}`);
+
     const shareCode = shareMetadata.surl;
     const fileName = file.server_filename || file.filename || `terabox_${shareCode}.file`;
     const fileSize = Number(file.size || 0);
     const mimeType = this.categoryToMime(file.category);
 
-    let downloadUrl = file.dlink;
-
-    if (!downloadUrl && config.TERABOX_GATEWAY_URL) {
+    let gwRes: any = null;
+    if (config.TERABOX_GATEWAY_URL) {
       try {
-        const gwRes = await this.safeFetch(`${config.TERABOX_GATEWAY_URL}/api/get-info?shorturl=${shareCode}&fs_id=${file.fs_id}`);
-        if (gwRes?.downloadUrl) {
-          downloadUrl = gwRes.downloadUrl;
-        }
+        gwRes = await this.safeFetch(`${config.TERABOX_GATEWAY_URL}/api/get-info?shorturl=${shareCode}&fs_id=${file.fs_id}`);
       } catch {}
+    }
+
+    let downloadUrl: string | null = null;
+    let urlSource = 'none';
+
+    const candidate =
+      file.dlink ||
+      (file as any).downloadUrl ||
+      gwRes?.downloadUrl ||
+      gwRes?.dlink ||
+      gwRes?.data?.downloadUrl ||
+      gwRes?.data?.dlink;
+
+    if (typeof candidate === 'string' && /^https?:\/\//i.test(candidate)) {
+      downloadUrl = candidate;
+      urlSource = file.dlink ? 'file.dlink' : 'gateway';
     }
 
     if (!downloadUrl && hasTeraBoxCredentials()) {
       try {
         downloadUrl = await this.getOfficialDownloadUrl(config.TERABOX_ACCESS_TOKEN!, String(file.fs_id), shareCode);
+        urlSource = 'official API';
       } catch {}
     }
 
-    if (!downloadUrl) {
-      downloadUrl = `${this.UNOFFICIAL_API_BASE}/share/download?surl=${shareCode}&fs_id=${file.fs_id}`;
+    if (!downloadUrl || !/^https?:\/\//i.test(downloadUrl)) {
+      logger.error(`[TeraBox] Failed to extract valid direct download URL for fs_id ${file.fs_id}`);
+      throw new ProviderUnavailableError(
+        'TeraBox metadata was resolved, but no valid direct download URL was returned.'
+      );
     }
 
-    logger.info(`[TeraBox] Direct download URL obtained for "${fileName}" (${fileSize} bytes)`);
+    logger.info(`[TeraBox] Direct URL source: ${urlSource} for "${fileName}" (${fileSize} bytes)`);
 
     const headers: Record<string, string> = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',

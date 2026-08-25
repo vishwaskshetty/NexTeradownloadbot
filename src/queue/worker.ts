@@ -25,17 +25,17 @@ function formatBytes(bytes: number | bigint): string {
   return parseFloat((num / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
-/**
- * Validates downloaded local file integrity:
- * Verifies file exists, actual size is at least 1 KB, content is not HTML/JSON error page,
- * and actual size matches expected provider metadata.
- */
 export interface ValidationResult {
   valid: boolean;
   actualSize: number;
   reason?: string;
 }
 
+/**
+ * Validates downloaded local file integrity & magic headers:
+ * Verifies file exists, actual size is >= 1 KB for media/archive files,
+ * content is not HTML/JSON error page, and magic signatures match where applicable.
+ */
 export const validateDownloadedFile = async (
   filePath: string,
   expectedSize?: number
@@ -46,17 +46,19 @@ export const validateDownloadedFile = async (
 
   const stat = fs.statSync(filePath);
   const actualSize = stat.size;
+  const ext = path.extname(filePath).toLowerCase();
+  const isTextFileExpected = ['.txt', '.json', '.html', '.htm', '.xml', '.csv', '.log'].includes(ext);
 
   // 1. Minimum size guard (e.g. 117 B response is rejected)
-  if (actualSize < 1024) {
+  if (actualSize < 1024 && !isTextFileExpected) {
     return {
       valid: false,
       actualSize,
-      reason: `File size too small (${actualSize} B). Minimum required is 1024 B.`
+      reason: `File size too small (${actualSize} B). Minimum required for media/archive files is 1024 B.`
     };
   }
 
-  // 2. Read first 512 bytes to inspect magic header content
+  // 2. Read initial 512 bytes to inspect content & header signatures
   const fd = fs.openSync(filePath, 'r');
   const buffer = Buffer.alloc(512);
   const bytesRead = fs.readSync(fd, buffer, 0, 512, 0);
@@ -64,25 +66,47 @@ export const validateDownloadedFile = async (
 
   const headerStr = buffer.toString('utf8', 0, bytesRead).trim();
 
-  if (
-    headerStr.startsWith('{"errno"') ||
-    headerStr.startsWith('{"error"') ||
-    headerStr.startsWith('{"status"') ||
-    headerStr.startsWith('{"msg"') ||
-    headerStr.toLowerCase().startsWith('<!doctype') ||
-    headerStr.toLowerCase().startsWith('<html') ||
-    headerStr.toLowerCase().startsWith('<body') ||
-    headerStr.includes('Access Denied') ||
-    headerStr.includes('Unauthorized')
-  ) {
-    return {
-      valid: false,
-      actualSize,
-      reason: `Downloaded content is an HTML/JSON error page rather than a valid file (${actualSize} B).`
-    };
+  // Reject HTML/JSON error payloads
+  if (!isTextFileExpected) {
+    if (
+      headerStr.startsWith('{"errno"') ||
+      headerStr.startsWith('{"error"') ||
+      headerStr.startsWith('{"status"') ||
+      headerStr.startsWith('{"msg"') ||
+      headerStr.toLowerCase().startsWith('<!doctype') ||
+      headerStr.toLowerCase().startsWith('<html') ||
+      headerStr.toLowerCase().startsWith('<body') ||
+      headerStr.includes('Access Denied') ||
+      headerStr.includes('Unauthorized')
+    ) {
+      return {
+        valid: false,
+        actualSize,
+        reason: `Downloaded content is an HTML/JSON error page rather than valid file bytes (${actualSize} B).`
+      };
+    }
   }
 
-  // 3. Expected vs Actual size match (if expected size > 10 MB and actual size < 50% expected)
+  // 3. File magic header signature checks where applicable
+  if (ext === '.mp4') {
+    if (buffer.indexOf('ftyp') === -1 && actualSize > 1024 * 1024) {
+      return { valid: false, actualSize, reason: 'File extension is .mp4 but missing valid ftyp header.' };
+    }
+  } else if (ext === '.mkv' || ext === '.webm') {
+    // EBML header 0x1A45DFA3
+    if (buffer[0] !== 0x1A || buffer[1] !== 0x45 || buffer[2] !== 0xDF || buffer[3] !== 0xA3) {
+      if (actualSize > 1024 * 1024) {
+        return { valid: false, actualSize, reason: 'File extension is MKV/WebM but missing valid EBML header.' };
+      }
+    }
+  } else if (ext === '.zip') {
+    // PK\x03\x04
+    if (buffer[0] !== 0x50 || buffer[1] !== 0x4B) {
+      return { valid: false, actualSize, reason: 'File extension is .zip but missing PK header.' };
+    }
+  }
+
+  // 4. Expected vs Actual size match (if expected size > 10 MB and actual size < 50% expected)
   if (expectedSize && expectedSize > 10 * 1024 * 1024) {
     if (actualSize < 0.5 * expectedSize) {
       return {
@@ -160,7 +184,7 @@ const sendMediaToTelegram = async (
 };
 
 /**
- * Downloads direct URL to disk via stream with progress logging & custom headers.
+ * Downloads direct URL to disk via stream with HTTP response header validation & progress logging.
  * Streams first to a temporary .part file, then renames to final destination file.
  */
 const downloadFileStream = async (
@@ -169,7 +193,8 @@ const downloadFileStream = async (
   headers?: Record<string, string>
 ): Promise<number> => {
   const partPath = `${destPath}.part`;
-  logger.info(`[Download] Starting stream download to ${partPath}`);
+  const parsedUrl = new URL(url);
+  logger.info(`[Download] Requested URL hostname: ${parsedUrl.hostname}`);
 
   const requestHeaders: Record<string, string> = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -182,7 +207,6 @@ const downloadFileStream = async (
     requestHeaders['Cookie'] = `ndus=${config.TERABOX_NDUS}`;
   }
 
-  const writer = fs.createWriteStream(partPath);
   const response = await axios({
     url,
     method: 'GET',
@@ -192,8 +216,29 @@ const downloadFileStream = async (
     maxRedirects: 5,
   });
 
-  logger.info(`[Download] HTTP status: ${response.status}`);
+  const contentType = String(response.headers['content-type'] || '').toLowerCase();
+  const contentLength = Number(response.headers['content-length'] || 0);
 
+  logger.info(
+    `[Download] HTTP status: ${response.status} | ` +
+    `Content-Type=${contentType || 'unknown'} | ` +
+    `Content-Length=${contentLength || 'unknown'}`
+  );
+
+  const ext = path.extname(destPath).toLowerCase();
+  const isTextFileExpected = ['.txt', '.json', '.html', '.htm', '.xml', '.csv', '.log'].includes(ext);
+
+  if (!isTextFileExpected && (contentType.includes('application/json') || contentType.includes('text/html'))) {
+    response.data.destroy?.();
+    throw new Error(`Invalid download response: received ${contentType} instead of media bytes`);
+  }
+
+  if (contentLength > 0 && contentLength < 1024 && !isTextFileExpected) {
+    response.data.destroy?.();
+    throw new Error(`Download response is suspiciously small: ${contentLength} bytes`);
+  }
+
+  const writer = fs.createWriteStream(partPath);
   let downloadedBytes = 0;
   let lastLoggedMb = 0;
 
@@ -210,7 +255,7 @@ const downloadFileStream = async (
 
   return new Promise((resolve, reject) => {
     writer.on('finish', () => {
-      logger.info(`[Download] Stream completed (${formatBytes(downloadedBytes)})`);
+      logger.info(`[Download] Final file size: ${formatBytes(downloadedBytes)}`);
       try {
         if (fs.existsSync(destPath)) {
           fs.unlinkSync(destPath);
@@ -287,49 +332,57 @@ export const initWorker = () => {
         `⚡ Extracting file information...`
       );
 
-      // Check PostgreSQL StoredFile Cache
+      // Check PostgreSQL StoredFile Cache with STRICT 1024-byte validation
       const cacheKeyStr = fsId ? `${url}#fs_${fsId}` : url;
       const urlHash = crypto.createHash('sha256').update(cacheKeyStr).digest('hex');
       const cachedFile = await db.storedFile.findUnique({ where: { urlHash } });
+      const cachedFileSize = Number(cachedFile?.fileSize || 0);
 
-      if (cachedFile && cachedFile.expiresAt > new Date()) {
-        logger.info(`⚡ Cache hit! Reusing telegramFileId: ${cachedFile.telegramFileId}`);
-        
-        await updateStatusMessage(
-          `📄 *File found*\n` +
-          `📁 \`${cachedFile.fileName}\`\n` +
-          `📦 ${formatBytes(cachedFile.fileSize || 0n)}\n\n` +
-          `⚡ _Sending cached file..._`
-        );
+      if (cachedFile) {
+        if (cachedFile.expiresAt > new Date() && cachedFileSize >= 1024 && cachedFile.telegramFileId) {
+          logger.info(`[Cache] Cache hit! Reusing telegramFileId: ${cachedFile.telegramFileId.substring(0, 10)}... (Size: ${formatBytes(cachedFileSize)})`);
+          
+          await updateStatusMessage(
+            `📄 *File found*\n` +
+            `📁 \`${cachedFile.fileName}\`\n` +
+            `📦 ${formatBytes(cachedFile.fileSize || 0n)}\n\n` +
+            `⚡ _Sending cached file..._`
+          );
 
-        // PROCESSING -> FILE_READY -> SENDING
-        await jobService.updateJobStatus(jobId, 'FILE_READY');
-        await jobService.updateJobStatus(jobId, 'SENDING');
+          // PROCESSING -> FILE_READY -> SENDING
+          await jobService.updateJobStatus(jobId, 'FILE_READY');
+          await jobService.updateJobStatus(jobId, 'SENDING');
 
-        // Deliver cached file to user using smart media type helper
-        await sendMediaToTelegram(
-          telegramId!,
-          cachedFile.telegramFileId,
-          cachedFile.fileName,
-          `✅ Download completed!\n🔗 Provider: ${adapter.name}\n⚡ Fast Cached Delivery`,
-          cachedFile.mimeType || undefined
-        );
+          // Deliver cached file to user using smart media type helper
+          await sendMediaToTelegram(
+            telegramId!,
+            cachedFile.telegramFileId,
+            cachedFile.fileName,
+            `✅ Download completed!\n🔗 Provider: ${adapter.name}\n⚡ Fast Cached Delivery`,
+            cachedFile.mimeType || undefined
+          );
 
-        // ATOMIC & IDEMPOTENT COMPLETION: Increments usage ONLY ONCE upon successful delivery
-        await jobService.completeJob(jobId, cachedFile.fileSize || 0n);
-        const updatedUsage = await usageService.getUsage(user.id);
-        const remaining = Math.max(0, dailyLimit - updatedUsage.dailyRequests);
+          // ATOMIC COMPLETION: Increments usage ONLY ONCE upon successful delivery
+          await jobService.completeJob(jobId, cachedFile.fileSize || 0n);
+          const updatedUsage = await usageService.getUsage(user.id);
+          const remaining = Math.max(0, dailyLimit - updatedUsage.dailyRequests);
 
-        const successMsg =
-          `✅ *DOWNLOAD COMPLETE*\n\n` +
-          `📁 File: \`${cachedFile.fileName}\`\n` +
-          `📦 Size: ${formatBytes(cachedFile.fileSize || 0n)}\n` +
-          `⚡ Provider: ${adapter.name}\n\n` +
-          `📊 Daily usage: ${updatedUsage.dailyRequests}/${dailyLimit}\n` +
-          `📥 Remaining: ${remaining}`;
+          const successMsg =
+            `✅ *DOWNLOAD COMPLETE*\n\n` +
+            `📁 File: \`${cachedFile.fileName}\`\n` +
+            `📦 Size: ${formatBytes(cachedFile.fileSize || 0n)}\n` +
+            `⚡ Provider: ${adapter.name}\n\n` +
+            `📊 Daily usage: ${updatedUsage.dailyRequests}/${dailyLimit}\n` +
+            `📥 Remaining: ${remaining}`;
 
-        await updateStatusMessage(successMsg);
-        return; // Job is fully done
+          await updateStatusMessage(successMsg);
+          return; // Job is fully done
+        } else {
+          logger.warn(`[Cache] Invalid cached file removed (Size: ${cachedFileSize} B). Forcing fresh download...`);
+          await db.storedFile.delete({ where: { id: cachedFile.id } }).catch(() => {});
+        }
+      } else {
+        logger.info(`[Cache] Cache miss for URL hash ${urlHash.substring(0, 8)}...`);
       }
 
       // Retry Loop with Fresh URL Resolution & Strict File Validation
@@ -378,10 +431,10 @@ export const initWorker = () => {
         validation = await validateDownloadedFile(tempFilePath, expectedSize);
 
         if (validation.valid) {
-          logger.info(`[Validation] Expected: ${formatBytes(expectedSize)}, Actual: ${formatBytes(validation.actualSize)}, Integrity: OK`);
+          logger.info(`[Validation] Expected: ${formatBytes(expectedSize)} | Actual: ${formatBytes(validation.actualSize)} | Integrity: OK`);
           break; // File is valid! Exit retry loop
         } else {
-          logger.error(`[Validation] Expected: ${formatBytes(expectedSize)}, Actual: ${formatBytes(validation.actualSize)}, Integrity: FAILED (${validation.reason}). Retrying fresh URL ${attempt}/${maxRetries}...`);
+          logger.error(`[Validation] Expected: ${formatBytes(expectedSize)} | Actual: ${formatBytes(validation.actualSize)} | Integrity: FAILED (${validation.reason}). Retrying fresh URL ${attempt}/${maxRetries}...`);
           if (tempFilePath && fs.existsSync(tempFilePath)) {
             try { fs.unlinkSync(tempFilePath); } catch (e) {}
           }
@@ -414,6 +467,8 @@ export const initWorker = () => {
       // Status: FILE_READY -> SENDING
       await jobService.updateJobStatus(jobId, 'SENDING');
 
+      logger.info(`[Telegram] Upload started only after validation passed (${formatBytes(actualSize)})`);
+
       // Upload file to Telegram storage channel cache if configured
       if (config.STORAGE_CHANNEL_ID) {
         try {
@@ -437,7 +492,7 @@ export const initWorker = () => {
               resolvedFile.mimeType
             );
 
-            // Save to PostgreSQL Cache
+            // Save to PostgreSQL Cache with validated actual file size
             const expiresAt = new Date();
             expiresAt.setHours(expiresAt.getHours() + config.STORAGE_RETENTION_HOURS);
             
