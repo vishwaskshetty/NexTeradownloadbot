@@ -14,6 +14,37 @@ app.use(cookieParser());
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'admin', 'views'));
 
+// Railway & System Health check endpoint
+app.get('/health', async (req, res) => {
+  let dbStatus = 'ok';
+  let redisStatus = 'ok';
+
+  try {
+    const { db } = require('./db');
+    await db.$queryRaw`SELECT 1`;
+  } catch (e) {
+    dbStatus = 'error';
+  }
+
+  try {
+    const { redis } = require('./redis');
+    await redis.ping();
+  } catch (e) {
+    redisStatus = 'error';
+  }
+
+  const isHealthy = dbStatus === 'ok' && redisStatus === 'ok';
+  return res.status(isHealthy ? 200 : 500).json({
+    status: isHealthy ? 'ok' : 'degraded',
+    timestamp: new Date().toISOString(),
+    services: {
+      database: dbStatus,
+      redis: redisStatus,
+      server: 'ok'
+    }
+  });
+});
+
 // Mount Admin Router
 app.use('/admin', adminRouter);
 
@@ -56,7 +87,7 @@ app.get('/verify/:token', async (req, res) => {
 });
 
 export const startServer = (port: number = 3000) => {
-  return app.listen(port, () => {
-    logger.info(`🌐 Webhook server listening on port ${port}`);
+  return app.listen(port, '0.0.0.0', () => {
+    logger.info(`🌐 Webhook & Admin server listening on 0.0.0.0:${port}`);
   });
 };

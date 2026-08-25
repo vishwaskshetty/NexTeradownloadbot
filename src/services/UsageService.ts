@@ -52,6 +52,14 @@ export class UsageService {
     }
     return config.FREE_DAILY_LIMIT;
   }
+
+  async getDailyLimitForUser(userId: number): Promise<number> {
+    const { userService } = require('./UserService');
+    const user = await db.user.findUnique({ where: { id: userId } });
+    if (!user) return config.FREE_DAILY_LIMIT;
+    const checkedUser = await userService.checkAndUpdatePremiumStatus(user);
+    return this.getDailyLimit(checkedUser.plan);
+  }
 }
 
 export const usageService = new UsageService();

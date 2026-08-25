@@ -1,0 +1,73 @@
+<% const currentPath = '/admin/referrals'; %>
+<%- include('partials/header', { currentPath }) %>
+
+<% if (typeof msg !== 'undefined' && msg) { %>
+  <div class="mb-6 bg-green-500/10 border border-green-500/20 text-green-400 p-4 rounded-xl flex items-center justify-between">
+    <span><%= msg %></span>
+  </div>
+<% } %>
+
+<% if (typeof error !== 'undefined' && error) { %>
+  <div class="mb-6 bg-red-500/10 border border-red-500/20 text-red-400 p-4 rounded-xl flex items-center justify-between">
+    <span><%= error %></span>
+  </div>
+<% } %>
+
+<div class="mb-8 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+  <div>
+    <h2 class="text-3xl font-bold text-white mb-2">🎁 Referral Management</h2>
+    <p class="text-slate-400">Configure viral referral rewards and track system statistics.</p>
+  </div>
+  <form action="/admin/referrals/toggle" method="POST">
+    <button type="submit" class="px-6 py-2.5 rounded-xl font-medium flex items-center gap-2 transition <%= isEnabled ? 'bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20' : 'bg-green-500/10 text-green-400 hover:bg-green-500/20 border border-green-500/20' %>">
+      <%= isEnabled ? '🔴 Disable Referral System' : '🟢 Enable Referral System' %>
+    </button>
+  </form>
+</div>
+
+<!-- STATS OVERVIEW -->
+<div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+  <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 border-l-4 border-l-blue-500">
+    <h3 class="text-blue-400 mb-1">Total Successful Referrals</h3>
+    <div class="text-3xl font-bold text-white"><%= totalReferrals %> <span class="text-lg font-normal text-slate-500">users</span></div>
+  </div>
+  <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 border-l-4 border-l-purple-500">
+    <h3 class="text-purple-400 mb-1">Rewards Granted</h3>
+    <div class="text-3xl font-bold text-white"><%= totalRewardsGranted %> <span class="text-lg font-normal text-slate-500">milestones</span></div>
+  </div>
+  <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 border-l-4 border-l-amber-500">
+    <h3 class="text-amber-400 mb-1">Premium Days Awarded</h3>
+    <div class="text-3xl font-bold text-white"><%= totalPremiumDaysAwarded %> <span class="text-lg font-normal text-slate-500">days</span></div>
+  </div>
+</div>
+
+<!-- REFERRAL CONFIGURATION FORM -->
+<div class="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+  <h3 class="text-xl font-bold text-white mb-4 flex items-center gap-2">
+    <span>⚙️ Referral Reward Configuration</span>
+  </h3>
+
+  <form action="/admin/referrals/update" method="POST" class="space-y-6">
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <div>
+        <label class="block text-sm font-medium text-slate-400 mb-2">Required Referrals per Reward Milestone</label>
+        <input type="number" name="referralsRequired" value="<%= referralsRequired %>" required min="1" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-purple-500 transition">
+        <p class="text-xs text-slate-500 mt-1">Default: 10 referrals (e.g. 10, 20, 30 referrals earn rewards).</p>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium text-slate-400 mb-2">Reward Duration (Days Premium)</label>
+        <input type="number" name="rewardDays" value="<%= rewardDays %>" required min="1" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-purple-500 transition">
+        <p class="text-xs text-slate-500 mt-1">Default: 5 days premium per milestone.</p>
+      </div>
+    </div>
+
+    <div class="flex gap-4">
+      <button type="submit" class="bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-medium px-6 py-3 rounded-xl transition flex items-center gap-2">
+        <span>💾 Save Referral Settings</span>
+      </button>
+    </div>
+  </form>
+</div>
+
+<%- include('partials/footer') %>

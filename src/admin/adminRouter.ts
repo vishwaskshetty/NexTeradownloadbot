@@ -68,25 +68,118 @@ adminRouter.get('/users', async (req, res) => {
   res.render('users', { users });
 });
 
-// Premium
+// Premium Management Routes
 adminRouter.get('/premium', async (req, res) => {
+  const page = parseInt(req.query.page as string) || 1;
+  const search = (req.query.search as string) || '';
+  const msg = (req.query.msg as string) || null;
+  const error = (req.query.error as string) || null;
+
   const isEnabled = await adminService.getPremiumStatus();
-  const premiumUsers = await db.user.findMany({
-    where: { plan: 'PREMIUM' },
-    orderBy: { createdAt: 'desc' }
-  });
-  res.render('premium', { 
+  const { userService } = require('../services/UserService');
+  
+  const { users, total, totalPages } = await userService.getPremiumUsersList(page, 10, search);
+
+  res.render('premium', {
     isEnabled,
-    premiumUsers,
+    premiumUsers: users,
+    total,
+    totalPages,
+    page,
+    search,
+    msg,
+    error,
     freeLimit: config.FREE_DAILY_LIMIT,
     premiumLimit: config.PREMIUM_DAILY_LIMIT
   });
+});
+
+adminRouter.post('/premium/add', async (req, res) => {
+  try {
+    const { telegramId, duration, customDuration } = req.body;
+    const days = parseInt(customDuration || duration || '30', 10);
+    const targetId = BigInt(telegramId);
+    const adminId = config.ADMIN_TELEGRAM_IDS[0] || 0;
+
+    const { userService } = require('../services/UserService');
+    await userService.addPremium(adminId, targetId, days);
+
+    res.redirect(`/admin/premium?msg=${encodeURIComponent(`✅ Added ${days} days premium to User ID ${telegramId}`)}`);
+  } catch (err: any) {
+    res.redirect(`/admin/premium?error=${encodeURIComponent(err.message || 'Failed to add premium')}`);
+  }
+});
+
+adminRouter.post('/premium/extend', async (req, res) => {
+  try {
+    const { telegramId, duration, customDuration } = req.body;
+    const days = parseInt(customDuration || duration || '30', 10);
+    const targetId = BigInt(telegramId);
+    const adminId = config.ADMIN_TELEGRAM_IDS[0] || 0;
+
+    const { userService } = require('../services/UserService');
+    await userService.extendPremium(adminId, targetId, days);
+
+    res.redirect(`/admin/premium?msg=${encodeURIComponent(`✅ Extended premium for User ID ${telegramId} by ${days} days`)}`);
+  } catch (err: any) {
+    res.redirect(`/admin/premium?error=${encodeURIComponent(err.message || 'Failed to extend premium')}`);
+  }
+});
+
+adminRouter.post('/premium/remove', async (req, res) => {
+  try {
+    const { telegramId } = req.body;
+    const targetId = BigInt(telegramId);
+    const adminId = config.ADMIN_TELEGRAM_IDS[0] || 0;
+
+    const { userService } = require('../services/UserService');
+    await userService.removePremium(adminId, targetId);
+
+    res.redirect(`/admin/premium?msg=${encodeURIComponent(`✅ Removed premium for User ID ${telegramId}`)}`);
+  } catch (err: any) {
+    res.redirect(`/admin/premium?error=${encodeURIComponent(err.message || 'Failed to remove premium')}`);
+  }
 });
 
 adminRouter.post('/premium/toggle', async (req, res) => {
   const isEnabled = await adminService.getPremiumStatus();
   await adminService.setPremiumStatus(!isEnabled);
   res.redirect('/admin/premium');
+});
+
+// Referral Management Routes
+adminRouter.get('/referrals', async (req, res) => {
+  const { referralService } = require('../services/ReferralService');
+  const stats = await referralService.getGlobalReferralStats();
+  const msg = (req.query.msg as string) || null;
+  const error = (req.query.error as string) || null;
+
+  res.render('referrals', {
+    ...stats,
+    msg,
+    error
+  });
+});
+
+adminRouter.post('/referrals/toggle', async (req, res) => {
+  const isEnabled = await adminService.getReferralStatus();
+  await adminService.setReferralStatus(!isEnabled);
+  res.redirect('/admin/referrals?msg=✅ Referral status updated');
+});
+
+adminRouter.post('/referrals/update', async (req, res) => {
+  try {
+    const { referralsRequired, rewardDays } = req.body;
+    const count = parseInt(referralsRequired, 10);
+    const days = parseInt(rewardDays, 10);
+
+    if (count > 0) await adminService.setReferralsRequired(count);
+    if (days > 0) await adminService.setReferralRewardDays(days);
+
+    res.redirect('/admin/referrals?msg=✅ Referral settings updated successfully');
+  } catch (err: any) {
+    res.redirect(`/admin/referrals?error=${encodeURIComponent(err.message || 'Failed to update referral settings')}`);
+  }
 });
 
 // Verification

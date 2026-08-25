@@ -1,5 +1,5 @@
 import { Context } from 'telegraf';
-import { getMainKeyboard } from '../keyboards/mainKeyboard';
+import { getMainKeyboard, getDisclaimerText } from '../keyboards/mainKeyboard';
 import { userService } from '../../services/UserService';
 import { adminService } from '../../services/AdminService';
 import { verificationService } from '../../verification/verification.service';
@@ -12,7 +12,9 @@ export const getMainMenuText = () => {
 
 ⚡ Fast and reliable file processing bot.
 
-Choose an option below:`;
+Choose an option below:
+
+⚠️ _By using this bot, you agree that you use it at your own risk._`;
 };
 
 export const startCommand = async (ctx: Context) => {
@@ -35,9 +37,20 @@ export const startCommand = async (ctx: Context) => {
     const isVerificationRequired = await adminService.getVerificationStatus();
     const showVerification = isVerificationRequired && user.plan === 'FREE';
 
-    // Check if there is a verification deep link payload (e.g. /start verify_<token> or /start v_<token>)
     // @ts-ignore
     const text: string = ctx.message?.text || '';
+
+    // Check if there is a referral deep link payload (e.g. /start ref_123456789)
+    const refMatch = text.match(/\/start\s+(?:ref_|r_)(\d+)/i);
+    if (refMatch && refMatch[1]) {
+      const referrerTelegramId = parseInt(refMatch[1], 10);
+      logger.info(`[startCommand] Referral deep link received from ${referrerTelegramId} for new user ${telegramId}`);
+      
+      const { referralService } = require('../../services/ReferralService');
+      await referralService.processReferral(referrerTelegramId, telegramId);
+    }
+
+    // Check if there is a verification deep link payload (e.g. /start verify_<token> or /start v_<token>)
     const payloadMatch = text.match(/\/start\s+(?:verify_|v_)([a-f0-9]+)/i);
 
     if (payloadMatch && payloadMatch[1]) {

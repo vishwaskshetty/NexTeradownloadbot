@@ -2,7 +2,6 @@ import { Context } from 'telegraf';
 import type { User } from '@prisma/client';
 import { adminService } from '../../services/AdminService';
 import { userService } from '../../services/UserService';
-import { jobService } from '../../services/JobService';
 import { db } from '../../db';
 
 export const adminCommand = async (ctx: Context) => {
@@ -13,20 +12,20 @@ export const adminCommand = async (ctx: Context) => {
 
   // @ts-ignore
   const text = ctx.message?.text || '';
-  const args = text.split(' ').slice(1);
+  const args = text.split(' ').filter(Boolean).slice(1);
   // @ts-ignore
-  const command = ctx.message?.text.split(' ')[0].substring(1); // gets 'stats' from '/stats'
+  const command = ctx.message?.text.split(' ')[0].substring(1);
 
-  switch(command) {
-    case 'adminpanel':
+  switch (command) {
+    case 'adminpanel': {
       const { generateAdminToken } = require('../../admin/adminRouter');
       const token = generateAdminToken();
-      // Using process.env.PORT or 3000 assuming the bot runs on the same machine
       const port = process.env.PORT || 3000;
       const adminUrl = `http://localhost:${port}/admin/verify-token?token=${token}`;
       return ctx.reply(`Here is your one-time admin panel login link (valid for 15 minutes):\n\n${adminUrl}`);
+    }
 
-    case 'verification':
+    case 'verification': {
       if (args[0] === 'on') {
         await adminService.setVerificationStatus(true);
         return ctx.reply('✅ Global Verification is now ON.');
@@ -38,55 +37,129 @@ export const adminCommand = async (ctx: Context) => {
         return ctx.reply(`Global Verification is currently ${status ? 'ON' : 'OFF'}.`);
       }
       return ctx.reply('Usage: /verification [on|off|status]');
+    }
 
-    case 'stats':
+    case 'stats': {
       const userCount = await db.user.count();
       const jobCount = await db.job.count();
       const usageCount = await db.userUsage.aggregate({ _sum: { dailyRequests: true } });
       return ctx.reply(`📊 *Admin Stats*\n\nTotal Users: ${userCount}\nTotal Jobs: ${jobCount}\nTotal Requests Today: ${usageCount._sum.dailyRequests || 0}`, { parse_mode: 'Markdown' });
+    }
 
-    case 'users':
+    case 'users': {
       const recentUsers = await db.user.findMany({ take: 10, orderBy: { createdAt: 'desc' } });
-      const userList = recentUsers.map((u: User) => `${u.id} - ${u.username || u.firstName} [${u.plan}]`).join('\n');
+      const userList = recentUsers.map((u: User) => `${u.id} - ${u.username ? '@' + u.username : u.firstName} [${u.plan}]`).join('\n');
       return ctx.reply(`Recent Users:\n${userList}`);
+    }
 
-    case 'ban':
+    case 'ban': {
       if (!args[0]) return ctx.reply('Usage: /ban <telegramId>');
       await userService.banUser(parseInt(args[0], 10));
       return ctx.reply(`✅ Banned user ${args[0]}`);
+    }
 
-    case 'unban':
+    case 'unban': {
       if (!args[0]) return ctx.reply('Usage: /unban <telegramId>');
       await userService.unbanUser(parseInt(args[0], 10));
       return ctx.reply(`✅ Unbanned user ${args[0]}`);
+    }
 
-    case 'addpremium':
-      if (!args[0]) return ctx.reply('Usage: /addpremium <telegramId>');
-      // Find internal DB ID by Telegram ID
-      const pUser = await db.user.findUnique({ where: { telegramId: BigInt(args[0]) }});
-      if (!pUser) return ctx.reply('User not found.');
-      await adminService.setPremiumUser(pUser.id, true);
-      return ctx.reply(`⭐ Premium added to ${args[0]}`);
+    case 'addpremium': {
+      if (!args[0]) return ctx.reply('Usage: /addpremium <telegramId> [days]');
+      const targetId = parseInt(args[0], 10);
+      const days = args[1] ? parseInt(args[1], 10) : 30;
 
-    case 'removepremium':
+      try {
+        const result = await userService.addPremium(telegramId, targetId, days);
+        const expiresStr = result.newExpiry.toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+
+        return ctx.reply(
+          `✅ *PREMIUM ACTIVATED*\n\n👤 *User ID:* \`${targetId}\`\n⭐ *Plan:* Premium\n⏱ *Duration:* ${days} Days\n📅 *Expires:* ${expiresStr}`,
+          { parse_mode: 'Markdown' }
+        );
+      } catch (err: any) {
+        return ctx.reply(err.message || '❌ Failed to add premium.', { parse_mode: 'Markdown' });
+      }
+    }
+
+    case 'extendpremium': {
+      if (!args[0] || !args[1]) return ctx.reply('Usage: /extendpremium <telegramId> <days>');
+      const targetId = parseInt(args[0], 10);
+      const days = parseInt(args[1], 10);
+
+      try {
+        const result = await userService.extendPremium(telegramId, targetId, days);
+        const oldExpStr = result.previousExpiry ? new Date(result.previousExpiry).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) : 'None';
+        const newExpStr = result.newExpiry.toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+
+        return ctx.reply(
+          `➕ *PREMIUM EXTENDED*\n\n👤 *User ID:* \`${targetId}\`\n⏱ *Added Duration:* ${days} Days\n📅 *Previous Expiry:* ${oldExpStr}\n📅 *New Expiry:* ${newExpStr}`,
+          { parse_mode: 'Markdown' }
+        );
+      } catch (err: any) {
+        return ctx.reply(err.message || '❌ Failed to extend premium.', { parse_mode: 'Markdown' });
+      }
+    }
+
+    case 'removepremium': {
       if (!args[0]) return ctx.reply('Usage: /removepremium <telegramId>');
-      const rUser = await db.user.findUnique({ where: { telegramId: BigInt(args[0]) }});
-      if (!rUser) return ctx.reply('User not found.');
-      await adminService.setPremiumUser(rUser.id, false);
-      return ctx.reply(`❌ Premium removed from ${args[0]}`);
+      const targetId = parseInt(args[0], 10);
 
-    case 'broadcast':
+      try {
+        const result = await userService.removePremium(telegramId, targetId);
+        const prevExpStr = result.previousExpiry ? new Date(result.previousExpiry).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) : 'None';
+
+        return ctx.reply(
+          `✅ *PREMIUM REMOVED*\n\n👤 *User ID:* \`${targetId}\`\n⭐ *Previous Plan:* Premium\n📅 *Previous Expiry:* ${prevExpStr}`,
+          { parse_mode: 'Markdown' }
+        );
+      } catch (err: any) {
+        return ctx.reply(err.message || '❌ Failed to remove premium.', { parse_mode: 'Markdown' });
+      }
+    }
+
+    case 'viewpremium': {
+      if (!args[0]) return ctx.reply('Usage: /viewpremium <telegramId>');
+      const targetId = parseInt(args[0], 10);
+
+      const detail = await userService.getPremiumUserDetail(targetId);
+      if (!detail) {
+        return ctx.reply('❌ User not found.', { parse_mode: 'Markdown' });
+      }
+
+      const u = detail.user;
+      const expStr = u.premiumExpiresAt ? new Date(u.premiumExpiresAt).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) : 'Never';
+      const createdStr = new Date(u.createdAt).toLocaleDateString('en-US', { dateStyle: 'medium' });
+
+      return ctx.reply(
+        `👤 *USER PREMIUM DETAILS*\n\n` +
+        `*Telegram ID:* \`${u.telegramId}\`\n` +
+        `*Username:* ${u.username ? '@' + u.username : 'N/A'}\n` +
+        `*Name:* ${u.firstName || ''} ${u.lastName || ''}\n\n` +
+        `*Plan:* ${detail.isActive ? '⭐ PREMIUM' : '🆓 FREE'}\n` +
+        `*Status:* ${detail.statusText}\n\n` +
+        `*Started:* ${createdStr}\n` +
+        `*Expires:* ${expStr}\n` +
+        `*Remaining:* ${detail.remainingDays} days\n` +
+        `*Daily Limit:* ${detail.dailyLimit}`,
+        { parse_mode: 'Markdown' }
+      );
+    }
+
+    case 'broadcast': {
       if (args.length === 0) return ctx.reply('Usage: /broadcast <message>');
       const msg = args.join(' ');
       const { broadcastQueue } = require('../../queue/jobQueue');
       await broadcastQueue.add('broadcastMessage', { text: msg });
       return ctx.reply(`📢 Broadcast queued: ${msg}`);
+    }
 
-    case 'activejobs':
+    case 'activejobs': {
       const jobs = await db.job.count({ where: { status: { in: ['PENDING', 'QUEUED', 'PROCESSING'] } } });
       return ctx.reply(`⏳ Currently active processing jobs: ${jobs}`);
+    }
 
     default:
-      return ctx.reply('Unknown command or feature pending (setlimit, platforms).');
+      return ctx.reply('Unknown command or feature pending.');
   }
 };

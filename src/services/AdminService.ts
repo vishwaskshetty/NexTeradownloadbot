@@ -97,6 +97,59 @@ export class AdminService {
     });
     logger.info(`Admin set SHORTENER_PROVIDER to ${provider}`);
   }
+
+  // --- REFERRAL SYSTEM ---
+  async getReferralStatus(): Promise<boolean> {
+    const { redis } = require('../redis');
+    const cached = await redis.get('REFERRAL_ENABLED');
+    if (cached !== null) return cached === 'true';
+
+    const setting = await db.botSetting.findUnique({ where: { key: 'REFERRAL_ENABLED' } });
+    const isEnabled = setting ? setting.value === 'true' : (config.REFERRAL_ENABLED ?? true);
+    await redis.setex('REFERRAL_ENABLED', 300, isEnabled ? 'true' : 'false');
+    return isEnabled;
+  }
+
+  async setReferralStatus(enabled: boolean): Promise<void> {
+    await db.botSetting.upsert({
+      where: { key: 'REFERRAL_ENABLED' },
+      update: { value: enabled ? 'true' : 'false' },
+      create: { key: 'REFERRAL_ENABLED', value: enabled ? 'true' : 'false' }
+    });
+    const { redis } = require('../redis');
+    await redis.setex('REFERRAL_ENABLED', 300, enabled ? 'true' : 'false');
+    logger.info(`Admin set REFERRAL_ENABLED to ${enabled}`);
+  }
+
+  async getReferralsRequired(): Promise<number> {
+    const setting = await db.botSetting.findUnique({ where: { key: 'REFERRALS_REQUIRED' } });
+    if (setting) return parseInt(setting.value, 10) || 10;
+    return config.REFERRALS_REQUIRED || 10;
+  }
+
+  async setReferralsRequired(count: number): Promise<void> {
+    await db.botSetting.upsert({
+      where: { key: 'REFERRALS_REQUIRED' },
+      update: { value: count.toString() },
+      create: { key: 'REFERRALS_REQUIRED', value: count.toString() }
+    });
+    logger.info(`Admin set REFERRALS_REQUIRED to ${count}`);
+  }
+
+  async getReferralRewardDays(): Promise<number> {
+    const setting = await db.botSetting.findUnique({ where: { key: 'REFERRAL_REWARD_DAYS' } });
+    if (setting) return parseInt(setting.value, 10) || 5;
+    return config.REFERRAL_REWARD_DAYS || 5;
+  }
+
+  async setReferralRewardDays(days: number): Promise<void> {
+    await db.botSetting.upsert({
+      where: { key: 'REFERRAL_REWARD_DAYS' },
+      update: { value: days.toString() },
+      create: { key: 'REFERRAL_REWARD_DAYS', value: days.toString() }
+    });
+    logger.info(`Admin set REFERRAL_REWARD_DAYS to ${days}`);
+  }
 }
 
 export const adminService = new AdminService();

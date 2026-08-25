@@ -28,7 +28,10 @@ export const getAdminShortenerKeyboard = (isEnabled: boolean) => {
 
 export const getAdminPremiumKeyboard = (isEnabled: boolean) => {
   return Markup.inlineKeyboard([
-    [Markup.button.callback(isEnabled ? '🔴 Disable Premium' : '🟢 Enable Premium', 'admin_toggle_premium')],
+    [Markup.button.callback(isEnabled ? '🔴 Disable Global Premium' : '🟢 Enable Global Premium', 'admin_toggle_premium')],
+    [Markup.button.callback('⭐ Add Premium', 'admin_add_premium_prompt'), Markup.button.callback('➕ Extend Premium', 'admin_extend_premium_prompt')],
+    [Markup.button.callback('❌ Remove Premium', 'admin_remove_premium_prompt'), Markup.button.callback('👁 View User', 'admin_view_premium_prompt')],
+    [Markup.button.callback('📋 Premium Users List', 'admin_list_premium_1')],
     [Markup.button.callback('⬅️ Back', 'admin_panel')]
   ]);
 };

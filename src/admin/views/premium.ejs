@@ -1,58 +1,207 @@
 <% const currentPath = '/admin/premium'; %>
 <%- include('partials/header', { currentPath }) %>
 
-<div class="mb-8 flex justify-between items-center">
+<% if (typeof msg !== 'undefined' && msg) { %>
+  <div class="mb-6 bg-green-500/10 border border-green-500/20 text-green-400 p-4 rounded-xl flex items-center justify-between">
+    <span><%= msg %></span>
+  </div>
+<% } %>
+
+<% if (typeof error !== 'undefined' && error) { %>
+  <div class="mb-6 bg-red-500/10 border border-red-500/20 text-red-400 p-4 rounded-xl flex items-center justify-between">
+    <span><%= error %></span>
+  </div>
+<% } %>
+
+<div class="mb-8 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
   <div>
-    <h2 class="text-3xl font-bold text-white mb-2">Premium Users</h2>
-    <p class="text-slate-400">Manage premium subscriptions and limits.</p>
+    <h2 class="text-3xl font-bold text-white mb-2">⭐ Premium Users Management</h2>
+    <p class="text-slate-400">Add, extend, remove, search and manage premium user subscriptions.</p>
   </div>
   <form action="/admin/premium/toggle" method="POST">
-    <button type="submit" class="px-6 py-2.5 rounded-xl font-medium flex items-center gap-2 transition <%= isEnabled ? 'bg-red-500/10 text-red-400 hover:bg-red-500/20' : 'bg-green-500/10 text-green-400 hover:bg-green-500/20' %>">
-      <%= isEnabled ? 'Disable Global Premium' : 'Enable Global Premium' %>
+    <button type="submit" class="px-6 py-2.5 rounded-xl font-medium flex items-center gap-2 transition <%= isEnabled ? 'bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20' : 'bg-green-500/10 text-green-400 hover:bg-green-500/20 border border-green-500/20' %>">
+      <%= isEnabled ? '🚫 Disable Global Premium' : '⚡ Enable Global Premium' %>
     </button>
   </form>
 </div>
 
-<div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+<div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
   <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6">
-    <h3 class="text-slate-400 mb-1">Free Limit</h3>
+    <h3 class="text-slate-400 mb-1">Free Daily Limit</h3>
     <div class="text-3xl font-bold text-white"><%= freeLimit %> <span class="text-lg font-normal text-slate-500">/ day</span></div>
   </div>
   <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 border-l-4 border-l-purple-500">
-    <h3 class="text-purple-400 mb-1">Premium Limit</h3>
+    <h3 class="text-purple-400 mb-1">Premium Daily Limit</h3>
     <div class="text-3xl font-bold text-white"><%= premiumLimit %> <span class="text-lg font-normal text-slate-500">/ day</span></div>
+  </div>
+  <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 border-l-4 border-l-amber-500">
+    <h3 class="text-amber-400 mb-1">Total Subscribers</h3>
+    <div class="text-3xl font-bold text-white"><%= total %> <span class="text-lg font-normal text-slate-500">users</span></div>
   </div>
 </div>
 
+<!-- ADD / EXTEND PREMIUM FORM -->
+<div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 mb-8">
+  <h3 class="text-xl font-bold text-white mb-4 flex items-center gap-2">
+    <span>⭐ Add or Extend Premium Subscription</span>
+  </h3>
+
+  <form action="/admin/premium/add" method="POST" class="space-y-6">
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <div>
+        <label class="block text-sm font-medium text-slate-400 mb-2">Telegram User ID</label>
+        <input type="text" name="telegramId" required placeholder="e.g. 123456789" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-white placeholder-slate-600 focus:outline-none focus:border-purple-500 transition">
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium text-slate-400 mb-2">Duration Presets</label>
+        <select name="duration" id="durationSelect" onchange="toggleCustomDuration(this.value)" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-purple-500 transition">
+          <option value="1">1 Day</option>
+          <option value="3">3 Days</option>
+          <option value="7">7 Days</option>
+          <option value="15">15 Days</option>
+          <option value="30" selected>30 Days (1 Month)</option>
+          <option value="60">60 Days (2 Months)</option>
+          <option value="90">90 Days (3 Months)</option>
+          <option value="180">180 Days (6 Months)</option>
+          <option value="365">365 Days (1 Year)</option>
+          <option value="custom">Custom Duration...</option>
+        </select>
+      </div>
+    </div>
+
+    <div id="customDurationGroup" class="hidden">
+      <label class="block text-sm font-medium text-slate-400 mb-2">Custom Duration (Days)</label>
+      <input type="number" name="customDuration" placeholder="e.g. 45" min="1" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-white placeholder-slate-600 focus:outline-none focus:border-purple-500 transition">
+    </div>
+
+    <div class="flex gap-4">
+      <button type="submit" class="bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-medium px-6 py-3 rounded-xl transition flex items-center gap-2">
+        <span>⭐ ADD / EXTEND PREMIUM</span>
+      </button>
+    </div>
+  </form>
+</div>
+
+<!-- SEARCH & PREMIUM USERS TABLE -->
 <div class="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
-  <div class="p-6 border-b border-slate-800 flex justify-between items-center">
-    <h3 class="text-lg font-medium text-white">Premium Subscribers</h3>
+  <div class="p-6 border-b border-slate-800 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+    <h3 class="text-lg font-medium text-white">Subscribers List</h3>
+
+    <!-- SEARCH FORM -->
+    <form action="/admin/premium" method="GET" class="flex gap-2 w-full md:w-auto">
+      <input type="text" name="search" value="<%= search || '' %>" placeholder="Search Telegram ID or Username..." class="bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-purple-500 transition w-full md:w-64">
+      <button type="submit" class="bg-slate-800 hover:bg-slate-700 text-white text-sm font-medium px-4 py-2 rounded-xl transition">
+        🔍 Search
+      </button>
+      <% if (search) { %>
+        <a href="/admin/premium" class="bg-slate-800 hover:bg-slate-700 text-slate-400 text-sm font-medium px-3 py-2 rounded-xl transition flex items-center">
+          ✕
+        </a>
+      <% } %>
+    </form>
   </div>
+
   <div class="overflow-x-auto">
     <table class="w-full text-left border-collapse">
       <thead>
         <tr class="bg-slate-800/50 text-slate-400 text-sm uppercase tracking-wider">
           <th class="px-6 py-4 font-medium">User ID</th>
           <th class="px-6 py-4 font-medium">Telegram ID</th>
-          <th class="px-6 py-4 font-medium">Upgraded At</th>
+          <th class="px-6 py-4 font-medium">Username</th>
+          <th class="px-6 py-4 font-medium">Status</th>
+          <th class="px-6 py-4 font-medium">Expires At</th>
+          <th class="px-6 py-4 font-medium">Remaining</th>
+          <th class="px-6 py-4 font-medium">Actions</th>
         </tr>
       </thead>
       <tbody class="divide-y divide-slate-800/50">
         <% premiumUsers.forEach(user => { %>
+          <% 
+            const now = new Date();
+            const expires = user.premiumExpiresAt ? new Date(user.premiumExpiresAt) : null;
+            const isActive = user.isPremium && user.plan === 'PREMIUM' && expires && expires > now;
+            const remainingMs = expires ? Math.max(0, expires.getTime() - now.getTime()) : 0;
+            const remainingDays = Math.ceil(remainingMs / (1000 * 60 * 60 * 24));
+          %>
           <tr class="hover:bg-slate-800/20 transition-colors">
-            <td class="px-6 py-4 text-slate-300"><%= user.id %></td>
-            <td class="px-6 py-4 text-white"><%= user.telegramId %></td>
-            <td class="px-6 py-4 text-slate-400"><%= new Date(user.updatedAt).toLocaleDateString() %></td>
+            <td class="px-6 py-4 text-slate-300">#<%= user.id %></td>
+            <td class="px-6 py-4 text-white font-mono"><%= user.telegramId %></td>
+            <td class="px-6 py-4 text-slate-300"><%= user.username ? '@' + user.username : 'N/A' %></td>
+            <td class="px-6 py-4">
+              <% if (isActive) { %>
+                <span class="px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">🟢 ACTIVE</span>
+              <% } else { %>
+                <span class="px-3 py-1 rounded-full text-xs font-semibold bg-rose-500/10 text-rose-400 border border-rose-500/20">🔴 EXPIRED</span>
+              <% } %>
+            </td>
+            <td class="px-6 py-4 text-slate-400 text-sm">
+              <%= expires ? expires.toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) : 'Never' %>
+            </td>
+            <td class="px-6 py-4 text-slate-300 font-medium">
+              <%= isActive ? remainingDays + ' Days' : '0 Days' %>
+            </td>
+            <td class="px-6 py-4">
+              <div class="flex items-center gap-2">
+                <!-- EXTEND QUICK FORM -->
+                <form action="/admin/premium/extend" method="POST" class="inline">
+                  <input type="hidden" name="telegramId" value="<%= user.telegramId %>">
+                  <input type="hidden" name="duration" value="30">
+                  <button type="submit" title="Extend by 30 Days" class="px-3 py-1.5 rounded-lg text-xs font-medium bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 transition border border-purple-500/20">
+                    ➕ +30d
+                  </button>
+                </form>
+
+                <!-- REMOVE FORM -->
+                <form action="/admin/premium/remove" method="POST" class="inline" onsubmit="return confirm('Are you sure you want to remove premium status from user <%= user.telegramId %>?');">
+                  <input type="hidden" name="telegramId" value="<%= user.telegramId %>">
+                  <button type="submit" title="Remove Premium" class="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition border border-red-500/20">
+                    ❌ Remove
+                  </button>
+                </form>
+              </div>
+            </td>
           </tr>
         <% }) %>
         <% if (premiumUsers.length === 0) { %>
           <tr>
-            <td colspan="3" class="px-6 py-8 text-center text-slate-500">No premium users found.</td>
+            <td colspan="7" class="px-6 py-8 text-center text-slate-500">No premium subscribers found.</td>
           </tr>
         <% } %>
       </tbody>
     </table>
   </div>
+
+  <!-- PAGINATION -->
+  <% if (totalPages > 1) { %>
+    <div class="p-4 border-t border-slate-800 flex justify-between items-center text-sm text-slate-400">
+      <div>
+        Page <%= page %> of <%= totalPages %> (<%= total %> total subscribers)
+      </div>
+      <div class="flex gap-2">
+        <% if (page > 1) { %>
+          <a href="/admin/premium?page=<%= page - 1 %>&search=<%= search %>" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white transition">← Prev</a>
+        <% } %>
+        <% for (let p = 1; p <= totalPages; p++) { %>
+          <a href="/admin/premium?page=<%= p %>&search=<%= search %>" class="px-3 py-1.5 rounded-lg <%= p === page ? 'bg-purple-600 text-white font-bold' : 'bg-slate-800 hover:bg-slate-700 text-slate-300' %> transition"><%= p %></a>
+        <% } %>
+        <% if (page < totalPages) { %>
+          <a href="/admin/premium?page=<%= page + 1 %>&search=<%= search %>" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white transition">Next →</a>
+        <% } %>
+      </div>
+    </div>
+  <% } %>
 </div>
+
+<script>
+  function toggleCustomDuration(val) {
+    const group = document.getElementById('customDurationGroup');
+    if (val === 'custom') {
+      group.classList.remove('hidden');
+    } else {
+      group.classList.add('hidden');
+    }
+  }
+</script>
 
 <%- include('partials/footer') %>

@@ -39,7 +39,9 @@ bot.command('setdaily', adminCommand);
 bot.command('platforms', adminCommand);
 bot.command('premium', adminCommand);
 bot.command('addpremium', adminCommand);
+bot.command('extendpremium', adminCommand);
 bot.command('removepremium', adminCommand);
+bot.command('viewpremium', adminCommand);
 bot.command('activejobs', adminCommand);
 bot.command('cancel', async (ctx) => {
   const text = ctx.message?.text || '';
@@ -83,6 +85,24 @@ bot.command('help', (ctx) => {
   } as any);
 });
 
+bot.command('referrals', (ctx) => {
+  return require('./bot/handlers/callback').callbackHandler({
+    ...ctx,
+    callbackQuery: { data: 'referrals' },
+    answerCbQuery: async () => true,
+    editMessageText: async (text: string, extra: any) => ctx.reply(text, extra)
+  } as any);
+});
+
+bot.command('disclaimer', (ctx) => {
+  return require('./bot/handlers/callback').callbackHandler({
+    ...ctx,
+    callbackQuery: { data: 'disclaimer' },
+    answerCbQuery: async () => true,
+    editMessageText: async (text: string, extra: any) => ctx.reply(text, extra)
+  } as any);
+});
+
 // Actions/Callbacks
 bot.on('callback_query', (ctx) => callbackHandler(ctx));
 
@@ -91,13 +111,11 @@ bot.on('text', (ctx) => messageHandler(ctx));
 
 // Start the bot gracefully
 let isBotRunning = false;
+let workersInitialized = false;
 
 const start = async () => {
   try {
-    // 1. Validate environment
-    // (config/index.ts already does this on import)
-
-    // 2. Connect/check PostgreSQL
+    // 1. Connect/check PostgreSQL
     if (config.NODE_ENV !== 'test') {
       try {
         logger.info('Checking PostgreSQL...');
@@ -108,32 +126,29 @@ const start = async () => {
       }
     }
 
-    // 3. Connect/check Redis
+    // 2. Connect/check Redis
     if (config.NODE_ENV !== 'test') {
       try {
         logger.info('Checking Redis...');
         const { redis } = require('./redis');
         await redis.ping();
-        // The success log is handled by redis.ts connect event, 
-        // but we'll ensure the spacing looks correct if needed.
-        console.log(''); // Blank line to match requested format
+        console.log('');
       } catch (err) {
         throw new Error('Redis connection failed during startup health check.');
       }
     }
 
-    // 4. Start HTTP verification server
+    // 3. Start Express HTTP verification & Admin server (listens on PORT or 3000)
     if (config.NODE_ENV !== 'test') {
        logger.info('Starting HTTP server...');
-       const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+       const port = Number(process.env.PORT) || 3000;
        server = startServer(port);
-       logger.info('HTTP server started successfully\n');
+       logger.info(`HTTP server started successfully on port ${port}\n`);
     }
 
-    // 5. Initialize workers/queues (ONLY IF NOT IN PRODUCTION)
-    let workersInitialized = false;
-    if (config.NODE_ENV !== 'test' && config.NODE_ENV !== 'production' && !workersInitialized) {
-       logger.info('Initializing workers locally...');
+    // 4. Initialize download and system workers (Runs in both Dev & Production)
+    if (config.NODE_ENV !== 'test' && !workersInitialized) {
+       logger.info('Initializing workers...');
        const { initWorker } = require('./queue/worker');
        const { initBroadcastWorker } = require('./queue/broadcast');
        const { initCleanupWorker } = require('./queue/cleanup');
@@ -141,10 +156,10 @@ const start = async () => {
        initBroadcastWorker();
        initCleanupWorker();
        workersInitialized = true;
-       logger.info('Workers initialized successfully locally\n');
+       logger.info('Workers initialized successfully\n');
     }
 
-    // 6. Remove any Telegram webhook
+    // 5. Remove any leftover Telegram webhooks before long polling
     logger.info('Removing Telegram webhook...');
     try {
       await bot.telegram.deleteWebhook({ drop_pending_updates: true });
@@ -153,34 +168,34 @@ const start = async () => {
       logger.error('Failed to remove Telegram webhook.');
     }
 
-    // 7. Start Telegram long polling & Confirm successful startup
-    // 9. Keep process alive if local
-    if (config.NODE_ENV !== 'production') {
-      bot.launch({ dropPendingUpdates: true }).catch(err => {
-        logger.error(`Telegram launch failed: ${err.message}`);
-        isBotRunning = false;
-      });
-      isBotRunning = true;
-      console.log('');
-      logger.info('🚀 Starting NexTeraDownloadBot...');
-      logger.info('🟢 PostgreSQL connected');
-      logger.info('🟢 Redis connected');
-      logger.info('🟢 HTTP server started');
-      logger.info('🟢 Queue initialized');
-      logger.info('🟢 Workers initialized');
-      logger.info('🟢 Telegram bot started');
-      logger.info('🤖 NexTeraDownloadBot is online');
-      console.log('');
+    // 6. Start Telegram bot long polling (Runs in both Dev & Production)
+    if (config.NODE_ENV !== 'test') {
+      logger.info('🚀 Starting NexTeraDownloadBot Telegram polling...');
+
+      bot.launch({ dropPendingUpdates: true })
+        .then(() => {
+          isBotRunning = true;
+          logger.info('🟢 PostgreSQL connected');
+          logger.info('🟢 Redis connected');
+          logger.info('🟢 HTTP server started');
+          logger.info('🟢 Queue initialized');
+          logger.info('🟢 Workers initialized');
+          logger.info('🟢 Telegram bot started');
+          logger.info('🤖 NexTeraDownloadBot is online 24/7');
+        })
+        .catch((err) => {
+          isBotRunning = false;
+          logger.error(`❌ Telegram launch failed: ${err.message}`);
+        });
     }
 
   } catch (error: any) {
     if (error.code === 'EPERM' && error.message.includes('query_engine-windows.dll.node')) {
-      logger.warn('Windows EPERM lock detected on Prisma. Please run: taskkill /F /IM node.exe');
+      logger.warn('Windows EPERM lock detected on Prisma.');
     } else {
       logger.error(`Failed to start the bot: ${error.message}`);
     }
     
-    // Cleanup before exit
     if (server) {
       server.close();
     }
@@ -191,9 +206,7 @@ const start = async () => {
       try {
         const { redis } = require('./redis');
         await redis.quit();
-      } catch (e) {
-        // Ignore redis cleanup errors
-      }
+      } catch (e) {}
     }
     
     process.exit(1);
@@ -204,7 +217,7 @@ if (config.NODE_ENV !== 'test') {
   start();
 }
 
-// Graceful shutdown handling
+// Graceful shutdown handling for Railway / Docker / Kubernetes
 let isShuttingDown = false;
 
 const shutdown = async (signal: string) => {
@@ -219,9 +232,7 @@ const shutdown = async (signal: string) => {
     try {
       bot.stop(signal);
       logger.info('🟢 Telegram stopped');
-    } catch (error) {
-      // Ignore
-    }
+    } catch (error) {}
     isBotRunning = false;
   }
 
@@ -252,7 +263,6 @@ const shutdown = async (signal: string) => {
     logger.info('🟢 PostgreSQL disconnected');
 
   } catch (err: any) {
-    // Suppress shutdown errors
   } finally {
     logger.info('✅ Shutdown complete');
     process.exit(0);
@@ -262,4 +272,4 @@ const shutdown = async (signal: string) => {
 process.once('SIGINT', () => shutdown('SIGINT'));
 process.once('SIGTERM', () => shutdown('SIGTERM'));
 
-export { bot }; // export for testing
+export { bot };

@@ -11,7 +11,9 @@ import {
   getAccountKeyboard,
   getMyStatusKeyboard,
   getVerificationRequiredKeyboard,
-  getVerifiedKeyboard
+  getVerifiedKeyboard,
+  getReferralKeyboard,
+  getDisclaimerText
 } from '../keyboards/mainKeyboard';
 import { 
   getAdminKeyboard, 
@@ -98,19 +100,25 @@ Send me a supported link to process your download.
     }
 
     else if (data === 'account') {
-      const usage = await usageService.getUsage(user.id);
-      const dailyLimit = await usageService.getDailyLimit(user.plan);
-      const isVerified = await verificationService.isUserVerified(user.id);
+      const checkedUser = await userService.checkAndUpdatePremiumStatus(user);
+      const usage = await usageService.getUsage(checkedUser.id);
+      const dailyLimit = await usageService.getDailyLimit(checkedUser.plan);
+      const isVerified = await verificationService.isUserVerified(checkedUser.id);
       const remaining = Math.max(0, dailyLimit - usage.dailyRequests);
-      const regDate = user.createdAt ? new Date(user.createdAt).toLocaleDateString() : 'N/A';
-      const displayName = escapeMarkdown(user.username ? `@${user.username}` : (user.firstName || 'User'));
+      const regDate = checkedUser.createdAt ? new Date(checkedUser.createdAt).toLocaleDateString() : 'N/A';
+      const displayName = escapeMarkdown(checkedUser.username ? `@${checkedUser.username}` : (checkedUser.firstName || 'User'));
+
+      const now = new Date();
+      const isPrem = checkedUser.isPremium && checkedUser.plan === 'PREMIUM' && checkedUser.premiumExpiresAt && checkedUser.premiumExpiresAt > now;
+      const expStr = checkedUser.premiumExpiresAt ? new Date(checkedUser.premiumExpiresAt).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) : 'N/A';
 
       const text = `
 👤 *ACCOUNT INFO*
 
-🆔 *Telegram ID:* \`${user.telegramId}\`
+🆔 *Telegram ID:* \`${checkedUser.telegramId}\`
 👤 *Username:* ${displayName}
-⭐ *Premium:* ${user.plan === 'PREMIUM' ? '🟢 Enabled' : '🔴 Disabled'}
+⭐ *Plan:* ${isPrem ? '⭐ Premium User' : '🆓 Free User'}
+${isPrem ? `📅 *Premium Expires:* ${expStr}` : ''}
 🔐 *Verification:* ${isVerified ? '✅ Verified' : '❌ Not Verified'}
 📥 *Daily Limit:* ${dailyLimit} downloads/day
 📊 *Used Today:* ${usage.dailyRequests} / ${dailyLimit}
@@ -126,16 +134,17 @@ Send me a supported link to process your download.
     }
 
     else if (data === 'my_status') {
-      const usage = await usageService.getUsage(user.id);
-      const dailyLimit = await usageService.getDailyLimit(user.plan);
-      const isVerified = await verificationService.isUserVerified(user.id);
+      const checkedUser = await userService.checkAndUpdatePremiumStatus(user);
+      const usage = await usageService.getUsage(checkedUser.id);
+      const dailyLimit = await usageService.getDailyLimit(checkedUser.plan);
+      const isVerified = await verificationService.isUserVerified(checkedUser.id);
       const remaining = Math.max(0, dailyLimit - usage.dailyRequests);
-      const displayName = escapeMarkdown(user.username ? `@${user.username}` : (user.firstName || user.telegramId.toString()));
+      const displayName = escapeMarkdown(checkedUser.username ? `@${checkedUser.username}` : (checkedUser.firstName || checkedUser.telegramId.toString()));
 
       // Check active job
       const activeJob = await db.job.findFirst({
         where: {
-          userId: user.id,
+          userId: checkedUser.id,
           status: { in: ['PENDING', 'QUEUED', 'PROCESSING', 'UPLOADING'] }
         },
         orderBy: { createdAt: 'desc' }
@@ -159,6 +168,93 @@ Send me a supported link to process your download.
       await ctx.editMessageText(text, {
         parse_mode: 'Markdown',
         ...getMyStatusKeyboard()
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
+    }
+
+    else if (data === 'referrals') {
+      const { referralService } = require('../../services/ReferralService');
+      const botUsername = ctx.botInfo?.username || config.BOT_USERNAME;
+      const stats = await referralService.getReferralStats(user.telegramId, botUsername);
+
+      const text = `
+🎁 *REFERRAL PROGRAM*
+
+Invite friends and earn Premium subscriptions for free!
+
+🔗 *Your referral link:*
+\`${stats.referralLink}\`
+
+📊 *Successful referrals:* ${stats.totalReferrals}
+🎯 *Next reward:* ${stats.neededForNext} more referral(s)
+⭐ *Reward:* ${stats.rewardDays} Days Premium
+
+📈 *Progress to next reward:*
+\`${stats.progressBar}\``;
+
+      await ctx.editMessageText(text, {
+        parse_mode: 'Markdown',
+        ...getReferralKeyboard()
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
+    }
+
+    else if (data === 'referral_link') {
+      const { referralService } = require('../../services/ReferralService');
+      const botUsername = ctx.botInfo?.username || config.BOT_USERNAME;
+      const stats = await referralService.getReferralStats(user.telegramId, botUsername);
+
+      await ctx.reply(
+        `🔗 *YOUR UNIQUE REFERRAL LINK*\n\nShare this link with your friends to earn free Premium:\n\n\`${stats.referralLink}\``,
+        { parse_mode: 'Markdown' }
+      ).catch(() => {});
+    }
+
+    else if (data === 'referral_stats') {
+      const { referralService } = require('../../services/ReferralService');
+      const botUsername = ctx.botInfo?.username || config.BOT_USERNAME;
+      const stats = await referralService.getReferralStats(user.telegramId, botUsername);
+
+      const text = `
+📊 *REFERRAL STATISTICS*
+
+👥 *Total Successful Referrals:* ${stats.totalReferrals}
+🏆 *Milestones Claimed:* ${stats.totalMilestonesClaimed}
+⭐ *Total Premium Earned:* ${stats.totalDaysEarned} Days
+
+🎯 *Current Milestone Progress:*
+\`${stats.progressBar}\`
+
+Each milestone of ${stats.requiredPerReward} referrals awards +${stats.rewardDays} Days Premium automatically!`;
+
+      await ctx.editMessageText(text, {
+        parse_mode: 'Markdown',
+        ...getBackKeyboard('referrals')
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
+    }
+
+    else if (data === 'referral_rewards') {
+      const { referralService } = require('../../services/ReferralService');
+      const botUsername = ctx.botInfo?.username || config.BOT_USERNAME;
+      const stats = await referralService.getReferralStats(user.telegramId, botUsername);
+
+      const text = `
+🏆 *REFERRAL REWARDS*
+
+• *Rule:* ${stats.requiredPerReward} referrals = ⭐ +${stats.rewardDays} Days Premium
+• *Milestones Claimed:* ${stats.totalMilestonesClaimed} times
+• *Total Days Awarded:* ${stats.totalDaysEarned} Days Premium
+
+Keep sharing your link:
+\`${stats.referralLink}\``;
+
+      await ctx.editMessageText(text, {
+        parse_mode: 'Markdown',
+        ...getBackKeyboard('referrals')
       }).catch((err: any) => {
         if (!err.message?.includes('message is not modified')) throw err;
       });
@@ -516,6 +612,15 @@ Contact administrator to upgrade your account to Premium.`;
       });
     }
 
+    else if (data === 'disclaimer') {
+      await ctx.editMessageText(getDisclaimerText(), {
+        parse_mode: 'Markdown',
+        ...getBackKeyboard('main_menu')
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
+    }
+
     // ----------------- ADMIN MENUS -----------------
     else if (data === 'admin_panel') {
       await ctx.editMessageText(`
@@ -667,10 +772,19 @@ ${newStatus ? '🟢 ACTIVE' : '🔴 INACTIVE'}`, {
     else if (data === 'admin_premium') {
       const isEnabled = await adminService.getPremiumStatus();
       const text = `
-⭐ *PREMIUM SETTINGS*
+⭐ *PREMIUM MANAGEMENT PANEL*
 
-Current status:
-${isEnabled ? '🟢 Enabled' : '🔴 Disabled'}`;
+Manage premium subscriptions, limits, and active subscribers.
+
+Global Premium Status: ${isEnabled ? '🟢 Enabled' : '🔴 Disabled'}
+Free Limit: ${config.FREE_DAILY_LIMIT} / day
+Premium Limit: ${config.PREMIUM_DAILY_LIMIT} / day
+
+Use the buttons below or commands:
+• \`/addpremium <telegram_id> [days]\`
+• \`/extendpremium <telegram_id> <days>\`
+• \`/removepremium <telegram_id>\`
+• \`/viewpremium <telegram_id>\``;
       
       await ctx.editMessageText(text, {
         parse_mode: 'Markdown',
@@ -695,6 +809,89 @@ ${newStatus ? '🟢 ENABLED' : '🔴 DISABLED'}`, {
       }).catch((err: any) => {
         if (!err.message?.includes('message is not modified')) throw err;
       });
+    }
+
+    else if (data.startsWith('admin_list_premium_')) {
+      const page = parseInt(data.replace('admin_list_premium_', '') || '1', 10);
+      const limit = 5;
+      const { users, total, totalPages } = await userService.getPremiumUsersList(page, limit);
+
+      let text = `📋 *PREMIUM SUBSCRIBERS LIST* (Page ${page}/${totalPages})\n\nTotal Premium Users: ${total}\n\n`;
+
+      if (users.length === 0) {
+        text += '_No active or expired premium users found._';
+      } else {
+        let idx = (page - 1) * limit + 1;
+        const now = new Date();
+        users.forEach((u: any) => {
+          const expires = u.premiumExpiresAt ? new Date(u.premiumExpiresAt) : null;
+          const isActive = u.isPremium && u.plan === 'PREMIUM' && expires && expires > now;
+          const remainingMs = expires ? Math.max(0, expires.getTime() - now.getTime()) : 0;
+          const remainingDays = Math.ceil(remainingMs / (1000 * 60 * 60 * 24));
+          const expStr = expires ? expires.toLocaleString('en-US', { dateStyle: 'short', timeStyle: 'short' }) : 'N/A';
+
+          text += `${idx}. 👤 *${escapeMarkdown(u.username ? '@' + u.username : (u.firstName || 'User'))}*\n`;
+          text += `   🆔 \`${u.telegramId}\` | ${isActive ? '🟢 ACTIVE' : '🔴 EXPIRED'}\n`;
+          text += `   📅 Expires: ${expStr} (${isActive ? remainingDays + ' days left' : 'Expired'})\n\n`;
+          idx++;
+        });
+      }
+
+      const navButtons = [];
+      if (page > 1) navButtons.push(Markup.button.callback('⬅️ Prev', `admin_list_premium_${page - 1}`));
+      if (page < totalPages) navButtons.push(Markup.button.callback('Next ➡️', `admin_list_premium_${page + 1}`));
+
+      const keyboard = Markup.inlineKeyboard([
+        ...(navButtons.length > 0 ? [navButtons] : []),
+        [Markup.button.callback('⬅️ Back to Premium Menu', 'admin_premium')]
+      ]);
+
+      await ctx.editMessageText(text, {
+        parse_mode: 'Markdown',
+        ...keyboard
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
+    }
+
+    else if (data === 'admin_add_premium_prompt') {
+      await ctx.editMessageText(
+        `⭐ *ADD PREMIUM USER*\n\nTo add premium for a user, use the command:\n\n\`/addpremium <telegram_id> [days]\` \n\nExample:\n\`/addpremium 123456789 30\`\n\nPresets available: 1, 3, 7, 15, 30, 60, 90, 180, 365 days.`,
+        {
+          parse_mode: 'Markdown',
+          ...getBackKeyboard('admin_premium')
+        }
+      ).catch(() => {});
+    }
+
+    else if (data === 'admin_extend_premium_prompt') {
+      await ctx.editMessageText(
+        `➕ *EXTEND PREMIUM*\n\nTo extend premium for a user, use the command:\n\n\`/extendpremium <telegram_id> <days>\` \n\nExample:\n\`/extendpremium 123456789 15\``,
+        {
+          parse_mode: 'Markdown',
+          ...getBackKeyboard('admin_premium')
+        }
+      ).catch(() => {});
+    }
+
+    else if (data === 'admin_remove_premium_prompt') {
+      await ctx.editMessageText(
+        `❌ *REMOVE PREMIUM*\n\nTo remove premium from a user, use the command:\n\n\`/removepremium <telegram_id>\` \n\nExample:\n\`/removepremium 123456789\``,
+        {
+          parse_mode: 'Markdown',
+          ...getBackKeyboard('admin_premium')
+        }
+      ).catch(() => {});
+    }
+
+    else if (data === 'admin_view_premium_prompt') {
+      await ctx.editMessageText(
+        `👁 *VIEW PREMIUM USER*\n\nTo view details for a specific user, use the command:\n\n\`/viewpremium <telegram_id>\` \n\nExample:\n\`/viewpremium 123456789\``,
+        {
+          parse_mode: 'Markdown',
+          ...getBackKeyboard('admin_premium')
+        }
+      ).catch(() => {});
     }
 
     else if (data === 'admin_users' || data.startsWith('admin_users_')) {

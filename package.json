@@ -4,7 +4,7 @@
   "description": "",
   "main": "dist/bot.js",
   "scripts": {
-    "start": "node dist/server.js",
+    "start": "node dist/bot.js",
     "start:worker": "node dist/worker.js",
     "dev": "npx nodemon --watch src -e ts,ejs --exec \"npx ts-node src/bot.ts\"",
     "dev:worker": "npx nodemon --watch src -e ts --exec \"npx ts-node src/worker.ts\"",

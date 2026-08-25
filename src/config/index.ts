@@ -24,6 +24,10 @@ const envSchema = z.object({
   JOB_TIMEOUT_MS: z.coerce.number().default(1800000), // 30m default
   STORAGE_CHANNEL_ID: z.string().optional(),
   STORAGE_RETENTION_HOURS: z.coerce.number().default(24),
+  BOT_USERNAME: z.string().default('NexTeraDownloadBot'),
+  REFERRAL_ENABLED: z.coerce.boolean().default(true),
+  REFERRALS_REQUIRED: z.coerce.number().default(10),
+  REFERRAL_REWARD_DAYS: z.coerce.number().default(5),
   // TeraBox Official API credentials (optional)
   TERABOX_CLIENT_ID: z.string().optional(),
   TERABOX_CLIENT_SECRET: z.string().optional(),

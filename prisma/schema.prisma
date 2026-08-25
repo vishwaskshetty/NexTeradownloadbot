@@ -8,25 +8,31 @@ datasource db {
 }
 
 model User {
-  id                  Int                   @id @default(autoincrement())
-  telegramId          BigInt                @unique
-  username            String?
-  firstName           String?
-  lastName            String?
-  languageCode        String?
-  plan                String                @default("FREE") // FREE, PREMIUM
-  isBanned            Boolean               @default(false)
-  lastActivity        DateTime              @default(now())
+  id                    Int                   @id @default(autoincrement())
+  telegramId            BigInt                @unique
+  username              String?
+  firstName             String?
+  lastName              String?
+  languageCode          String?
+  plan                  String                @default("FREE") // FREE, PREMIUM
+  isPremium             Boolean               @default(false)
+  premiumExpiresAt      DateTime?
+  isBanned              Boolean               @default(false)
+  lastActivity          DateTime              @default(now())
   verificationExpiresAt DateTime?
-  createdAt           DateTime              @default(now())
-  updatedAt           DateTime              @updatedAt
-  jobs                Job[]
-  verificationSessions VerificationSession[]
-  usage               UserUsage?
-  premiumInfo         PremiumUser?
-  adminActions        AdminAction[]
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
+  jobs                  Job[]
+  verificationSessions   VerificationSession[]
+  usage                 UserUsage?
+  premiumInfo           PremiumUser?
+  adminActions          AdminAction[]
+  referralsSent         Referral[]            @relation("ReferrerUser")
+  referralReceived      Referral?             @relation("ReferredUser")
+  referralMilestones    ReferralMilestone[]
 
   @@index([telegramId, plan, isBanned])
+  @@index([isPremium, premiumExpiresAt])
 }
 
 model Job {
@@ -98,13 +104,42 @@ model PremiumUser {
 }
 
 model AdminAction {
-  id          Int      @id @default(autoincrement())
-  adminUserId Int
-  adminUser   User     @relation(fields: [adminUserId], references: [id])
-  actionType  String
-  targetId    String?
-  details     String?
-  createdAt   DateTime @default(now())
+  id                   Int       @id @default(autoincrement())
+  adminUserId          Int?
+  adminUser            User?     @relation(fields: [adminUserId], references: [id])
+  adminTelegramId      BigInt?
+  targetUserTelegramId BigInt?
+  action               String?   // ADD_PREMIUM, EXTEND_PREMIUM, REMOVE_PREMIUM
+  duration             Int?      // duration in days
+  previousExpiry       DateTime?
+  newExpiry            DateTime?
+  actionType           String
+  targetId             String?
+  details              String?
+  createdAt            DateTime  @default(now())
+}
+
+model Referral {
+  id              Int      @id @default(autoincrement())
+  referrerUserId  Int
+  referrerUser    User     @relation("ReferrerUser", fields: [referrerUserId], references: [id])
+  referredUserId  Int      @unique
+  referredUser    User     @relation("ReferredUser", fields: [referredUserId], references: [id])
+  createdAt       DateTime @default(now())
+
+  @@index([referrerUserId])
+}
+
+model ReferralMilestone {
+  id              Int      @id @default(autoincrement())
+  referrerUserId  Int
+  referrerUser    User     @relation(fields: [referrerUserId], references: [id])
+  milestone       Int
+  referralCount   Int
+  rewardDays      Int
+  createdAt       DateTime @default(now())
+
+  @@unique([referrerUserId, milestone])
 }
 
 model BotSetting {
