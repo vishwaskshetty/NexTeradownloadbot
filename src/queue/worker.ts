@@ -30,7 +30,6 @@ function formatBytes(bytes: number | bigint): string {
  * Verifies file exists, actual size is at least 1 KB, content is not HTML/JSON error page,
  * and actual size matches expected provider metadata.
  */
-
 export interface ValidationResult {
   valid: boolean;
   actualSize: number;
@@ -89,7 +88,7 @@ export const validateDownloadedFile = async (
       return {
         valid: false,
         actualSize,
-        reason: `Downloaded file size (${formatBytes(actualSize)}) is significantly smaller than expected metadata size (${formatBytes(expectedSize)}).`
+        reason: `Downloaded file size (${formatBytes(actualSize)}) is dramatically smaller than provider metadata (${formatBytes(expectedSize)}).`
       };
     }
   }
@@ -161,29 +160,39 @@ const sendMediaToTelegram = async (
 };
 
 /**
- * Downloads direct URL to disk via stream with progress logging & custom headers
+ * Downloads direct URL to disk via stream with progress logging & custom headers.
+ * Streams first to a temporary .part file, then renames to final destination file.
  */
 const downloadFileStream = async (
   url: string,
   destPath: string,
   headers?: Record<string, string>
 ): Promise<number> => {
-  logger.info(`[Download] Starting download stream to ${destPath}`);
+  const partPath = `${destPath}.part`;
+  logger.info(`[Download] Starting stream download to ${partPath}`);
 
-  const writer = fs.createWriteStream(destPath);
+  const requestHeaders: Record<string, string> = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Referer': 'https://www.terabox.app/',
+    'Accept': '*/*',
+    ...(headers || {})
+  };
+
+  if (config.TERABOX_NDUS && !requestHeaders['Cookie']) {
+    requestHeaders['Cookie'] = `ndus=${config.TERABOX_NDUS}`;
+  }
+
+  const writer = fs.createWriteStream(partPath);
   const response = await axios({
     url,
     method: 'GET',
     responseType: 'stream',
     timeout: 60000,
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-      'Referer': 'https://www.terabox.app/',
-      'Accept': '*/*',
-      ...(headers || {})
-    },
+    headers: requestHeaders,
     maxRedirects: 5,
   });
+
+  logger.info(`[Download] HTTP status: ${response.status}`);
 
   let downloadedBytes = 0;
   let lastLoggedMb = 0;
@@ -201,11 +210,22 @@ const downloadFileStream = async (
 
   return new Promise((resolve, reject) => {
     writer.on('finish', () => {
-      logger.info(`[Download] Download completed (${formatBytes(downloadedBytes)})`);
-      resolve(downloadedBytes);
+      logger.info(`[Download] Stream completed (${formatBytes(downloadedBytes)})`);
+      try {
+        if (fs.existsSync(destPath)) {
+          fs.unlinkSync(destPath);
+        }
+        fs.renameSync(partPath, destPath);
+        resolve(downloadedBytes);
+      } catch (renameErr) {
+        reject(renameErr);
+      }
     });
     writer.on('error', (err) => {
       logger.error(`[Download] Stream error: ${err.message}`);
+      if (fs.existsSync(partPath)) {
+        try { fs.unlinkSync(partPath); } catch (e) {}
+      }
       reject(err);
     });
   });
@@ -316,8 +336,14 @@ export const initWorker = () => {
       let resolvedFile: any = null;
       let validation: ValidationResult = { valid: false, actualSize: 0 };
       const maxRetries = 3;
+      const tmpDir = path.join(os.tmpdir(), 'nexterabox');
+      if (!fs.existsSync(tmpDir)) {
+        try { fs.mkdirSync(tmpDir, { recursive: true }); } catch (e) {}
+      }
 
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        logger.info(`[Download] Attempt ${attempt}/${maxRetries} starting...`);
+
         // Resolve direct link for single or selected multi-file item
         const adapterInstance = adapter as any;
         resolvedFile = typeof adapterInstance.resolveSelectedFile === 'function'
@@ -340,7 +366,7 @@ export const initWorker = () => {
           try { fs.unlinkSync(tempFilePath); } catch (e) {}
         }
         const safeName = filename.replace(/[^a-zA-Z0-9_.-]/g, '_');
-        tempFilePath = path.join(os.tmpdir(), `nextera_${jobId}_${Date.now()}_${safeName}`);
+        tempFilePath = path.join(tmpDir, `${jobId}_${attempt}_${safeName}`);
 
         try {
           await downloadFileStream(resolvedFile.downloadUrl, tempFilePath, resolvedFile.headers);
@@ -506,12 +532,18 @@ export const initWorker = () => {
       await updateStatusMessage(userMsg);
     } finally {
       // Temporary file cleanup ALWAYS happens
-      if (tempFilePath && fs.existsSync(tempFilePath)) {
-        try {
-          fs.unlinkSync(tempFilePath);
-          logger.info(`🧹 Cleaned up temporary file ${tempFilePath}`);
-        } catch (e: any) {
-          logger.error(`Failed to delete temp file ${tempFilePath}: ${e.message}`);
+      if (tempFilePath) {
+        const partPath = `${tempFilePath}.part`;
+        if (fs.existsSync(partPath)) {
+          try { fs.unlinkSync(partPath); } catch (e) {}
+        }
+        if (fs.existsSync(tempFilePath)) {
+          try {
+            fs.unlinkSync(tempFilePath);
+            logger.info(`🧹 Cleaned up temporary file ${tempFilePath}`);
+          } catch (e: any) {
+            logger.error(`Failed to delete temp file ${tempFilePath}: ${e.message}`);
+          }
         }
       }
     }

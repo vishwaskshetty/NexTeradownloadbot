@@ -42,13 +42,17 @@ export interface TeraBoxResolvedFile {
  */
 export const TERABOX_DOMAINS = [
   'terabox.com',
+  'www.terabox.com',
   'teraboxapp.com',
+  'www.teraboxapp.com',
   '1024terabox.com',
+  'www.1024terabox.com',
   'teraboxlink.com',
   'nephobox.com',
   '4funbox.com',
   'mirrobox.com',
   'terabox.app',
+  'www.terabox.app',
   'freeterabox.com',
   '1024tera.com',
   'momole.com',
@@ -153,18 +157,24 @@ export class TeraBoxResolver {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.REQUEST_TIMEOUT_MS);
 
+      const requestHeaders: Record<string, string> = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://www.terabox.app/',
+        ...((options.headers as Record<string, string>) || {}),
+      };
+
+      if (config.TERABOX_NDUS && !requestHeaders['Cookie']) {
+        requestHeaders['Cookie'] = `ndus=${config.TERABOX_NDUS}`;
+      }
+
       try {
         const response = await axios({
           ...options,
           url,
           signal: controller.signal,
           timeout: this.REQUEST_TIMEOUT_MS,
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Referer': 'https://www.terabox.app/',
-            ...(options.headers || {}),
-          },
+          headers: requestHeaders,
           maxRedirects: 5,
         });
         clearTimeout(timer);
@@ -218,7 +228,20 @@ export class TeraBoxResolver {
 
     let fileList: TeraBoxFileItem[] = [];
 
-    if (hasTeraBoxCredentials()) {
+    // Strategy 1: Configured Gateway Service (if set)
+    if (config.TERABOX_GATEWAY_URL) {
+      try {
+        const gwRes = await this.safeFetch(`${config.TERABOX_GATEWAY_URL}/api/get-info?shorturl=${shareCode}`);
+        if (gwRes && Array.isArray(gwRes.list) && gwRes.list.length > 0) {
+          fileList = gwRes.list;
+        }
+      } catch (e: any) {
+        logger.warn(`[TeraBox] Configured gateway resolution failed: ${e.message}`);
+      }
+    }
+
+    // Strategy 2: Official API
+    if (fileList.length === 0 && hasTeraBoxCredentials()) {
       const accessToken = config.TERABOX_ACCESS_TOKEN!;
       try {
         const data = await this.safeFetch(`${this.OFFICIAL_API_BASE}/rest/2.0/xpan/share/sharepage/query`, {
@@ -231,8 +254,8 @@ export class TeraBoxResolver {
       } catch {}
     }
 
+    // Strategy 3: Unofficial TeraBox shorturlinfo
     if (fileList.length === 0) {
-      // Unofficial metadata fetch via TeraBox shorturlinfo
       const infoUrl = `${this.UNOFFICIAL_API_BASE}/api/shorturlinfo`;
       try {
         const data = await this.safeFetch(infoUrl, {
@@ -302,11 +325,22 @@ export class TeraBoxResolver {
     const mimeType = this.categoryToMime(file.category);
 
     let downloadUrl = file.dlink;
+
+    if (!downloadUrl && config.TERABOX_GATEWAY_URL) {
+      try {
+        const gwRes = await this.safeFetch(`${config.TERABOX_GATEWAY_URL}/api/get-info?shorturl=${shareCode}&fs_id=${file.fs_id}`);
+        if (gwRes?.downloadUrl) {
+          downloadUrl = gwRes.downloadUrl;
+        }
+      } catch {}
+    }
+
     if (!downloadUrl && hasTeraBoxCredentials()) {
       try {
         downloadUrl = await this.getOfficialDownloadUrl(config.TERABOX_ACCESS_TOKEN!, String(file.fs_id), shareCode);
       } catch {}
     }
+
     if (!downloadUrl) {
       downloadUrl = `${this.UNOFFICIAL_API_BASE}/share/download?surl=${shareCode}&fs_id=${file.fs_id}`;
     }
@@ -318,6 +352,10 @@ export class TeraBoxResolver {
       'Referer': 'https://www.terabox.app/',
       'Accept': '*/*',
     };
+
+    if (config.TERABOX_NDUS) {
+      headers['Cookie'] = `ndus=${config.TERABOX_NDUS}`;
+    }
 
     return {
       fileName,

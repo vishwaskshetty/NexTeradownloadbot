@@ -28,11 +28,13 @@ const envSchema = z.object({
   REFERRAL_ENABLED: z.coerce.boolean().default(true),
   REFERRALS_REQUIRED: z.coerce.number().default(10),
   REFERRAL_REWARD_DAYS: z.coerce.number().default(5),
-  // TeraBox Official API credentials (optional)
+  // TeraBox Official API & Cookie credentials (optional)
   TERABOX_CLIENT_ID: z.string().optional(),
   TERABOX_CLIENT_SECRET: z.string().optional(),
   TERABOX_ACCESS_TOKEN: z.string().optional(),
   TERABOX_REFRESH_TOKEN: z.string().optional(),
+  TERABOX_NDUS: z.string().optional(),
+  TERABOX_GATEWAY_URL: z.string().optional(),
   // Diskwala Official API credentials (optional)
   DISKWALA_API_KEY: z.string().optional(),
 });
