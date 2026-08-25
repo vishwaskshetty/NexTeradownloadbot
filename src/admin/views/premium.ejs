@@ -1,0 +1,58 @@
+<% const currentPath = '/admin/premium'; %>
+<%- include('partials/header', { currentPath }) %>
+
+<div class="mb-8 flex justify-between items-center">
+  <div>
+    <h2 class="text-3xl font-bold text-white mb-2">Premium Users</h2>
+    <p class="text-slate-400">Manage premium subscriptions and limits.</p>
+  </div>
+  <form action="/admin/premium/toggle" method="POST">
+    <button type="submit" class="px-6 py-2.5 rounded-xl font-medium flex items-center gap-2 transition <%= isEnabled ? 'bg-red-500/10 text-red-400 hover:bg-red-500/20' : 'bg-green-500/10 text-green-400 hover:bg-green-500/20' %>">
+      <%= isEnabled ? 'Disable Global Premium' : 'Enable Global Premium' %>
+    </button>
+  </form>
+</div>
+
+<div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+  <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+    <h3 class="text-slate-400 mb-1">Free Limit</h3>
+    <div class="text-3xl font-bold text-white"><%= freeLimit %> <span class="text-lg font-normal text-slate-500">/ day</span></div>
+  </div>
+  <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 border-l-4 border-l-purple-500">
+    <h3 class="text-purple-400 mb-1">Premium Limit</h3>
+    <div class="text-3xl font-bold text-white"><%= premiumLimit %> <span class="text-lg font-normal text-slate-500">/ day</span></div>
+  </div>
+</div>
+
+<div class="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
+  <div class="p-6 border-b border-slate-800 flex justify-between items-center">
+    <h3 class="text-lg font-medium text-white">Premium Subscribers</h3>
+  </div>
+  <div class="overflow-x-auto">
+    <table class="w-full text-left border-collapse">
+      <thead>
+        <tr class="bg-slate-800/50 text-slate-400 text-sm uppercase tracking-wider">
+          <th class="px-6 py-4 font-medium">User ID</th>
+          <th class="px-6 py-4 font-medium">Telegram ID</th>
+          <th class="px-6 py-4 font-medium">Upgraded At</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-800/50">
+        <% premiumUsers.forEach(user => { %>
+          <tr class="hover:bg-slate-800/20 transition-colors">
+            <td class="px-6 py-4 text-slate-300"><%= user.id %></td>
+            <td class="px-6 py-4 text-white"><%= user.telegramId %></td>
+            <td class="px-6 py-4 text-slate-400"><%= new Date(user.updatedAt).toLocaleDateString() %></td>
+          </tr>
+        <% }) %>
+        <% if (premiumUsers.length === 0) { %>
+          <tr>
+            <td colspan="3" class="px-6 py-8 text-center text-slate-500">No premium users found.</td>
+          </tr>
+        <% } %>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<%- include('partials/footer') %>

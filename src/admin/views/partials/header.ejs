@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NexTeraDownloadBot Admin</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: '#3b82f6',
+            dark: '#0f172a',
+            darker: '#020617',
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    body { font-family: 'Inter', sans-serif; }
+    .glass {
+      background: rgba(15, 23, 42, 0.7);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+  </style>
+</head>
+<body class="bg-darker text-slate-300 min-h-screen flex flex-col md:flex-row">
+  <!-- Sidebar -->
+  <aside class="w-full md:w-64 glass md:min-h-screen p-4 flex flex-col gap-2">
+    <div class="mb-8 p-2 flex items-center gap-3">
+      <div class="w-10 h-10 bg-brand rounded-xl flex items-center justify-center text-white font-bold text-xl">N</div>
+      <div>
+        <h1 class="text-white font-bold tracking-wide text-lg">NexTera Admin</h1>
+        <p class="text-xs text-slate-400">Control Panel</p>
+      </div>
+    </div>
+    
+    <nav class="flex flex-col gap-1">
+      <a href="/admin/dashboard" class="px-4 py-3 rounded-lg hover:bg-slate-800 transition flex items-center gap-3 <%= typeof currentPath !== 'undefined' && currentPath === '/admin/dashboard' ? 'bg-brand/20 text-brand font-medium' : '' %>">
+        <span>📊</span> Dashboard
+      </a>
+      <a href="/admin/users" class="px-4 py-3 rounded-lg hover:bg-slate-800 transition flex items-center gap-3 <%= typeof currentPath !== 'undefined' && currentPath === '/admin/users' ? 'bg-brand/20 text-brand font-medium' : '' %>">
+        <span>👥</span> Users
+      </a>
+      <a href="/admin/premium" class="px-4 py-3 rounded-lg hover:bg-slate-800 transition flex items-center gap-3 <%= typeof currentPath !== 'undefined' && currentPath === '/admin/premium' ? 'bg-brand/20 text-brand font-medium' : '' %>">
+        <span>💎</span> Premium
+      </a>
+      <a href="/admin/verification" class="px-4 py-3 rounded-lg hover:bg-slate-800 transition flex items-center gap-3 <%= typeof currentPath !== 'undefined' && currentPath === '/admin/verification' ? 'bg-brand/20 text-brand font-medium' : '' %>">
+        <span>🔐</span> Verification
+      </a>
+      <a href="/admin/shortener" class="px-4 py-3 rounded-lg hover:bg-slate-800 transition flex items-center gap-3 <%= typeof currentPath !== 'undefined' && currentPath === '/admin/shortener' ? 'bg-brand/20 text-brand font-medium' : '' %>">
+        <span>🔗</span> Shortener
+      </a>
+      <a href="/admin/jobs" class="px-4 py-3 rounded-lg hover:bg-slate-800 transition flex items-center gap-3 <%= typeof currentPath !== 'undefined' && currentPath === '/admin/jobs' ? 'bg-brand/20 text-brand font-medium' : '' %>">
+        <span>📥</span> Active Downloads
+      </a>
+      <a href="/admin/statistics" class="px-4 py-3 rounded-lg hover:bg-slate-800 transition flex items-center gap-3 <%= typeof currentPath !== 'undefined' && currentPath === '/admin/statistics' ? 'bg-brand/20 text-brand font-medium' : '' %>">
+        <span>📈</span> Statistics
+      </a>
+      <a href="/admin/broadcast" class="px-4 py-3 rounded-lg hover:bg-slate-800 transition flex items-center gap-3 <%= typeof currentPath !== 'undefined' && currentPath === '/admin/broadcast' ? 'bg-brand/20 text-brand font-medium' : '' %>">
+        <span>📢</span> Broadcast
+      </a>
+      <a href="/admin/settings" class="px-4 py-3 rounded-lg hover:bg-slate-800 transition flex items-center gap-3 <%= typeof currentPath !== 'undefined' && currentPath === '/admin/settings' ? 'bg-brand/20 text-brand font-medium' : '' %>">
+        <span>⚙️</span> Settings
+      </a>
+    </nav>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="flex-1 p-6 md:p-10 overflow-y-auto">

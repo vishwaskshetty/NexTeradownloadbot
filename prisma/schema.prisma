@@ -1,0 +1,130 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                  Int                   @id @default(autoincrement())
+  telegramId          BigInt                @unique
+  username            String?
+  firstName           String?
+  lastName            String?
+  languageCode        String?
+  plan                String                @default("FREE") // FREE, PREMIUM
+  isBanned            Boolean               @default(false)
+  lastActivity        DateTime              @default(now())
+  verificationExpiresAt DateTime?
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+  jobs                Job[]
+  verificationSessions VerificationSession[]
+  usage               UserUsage?
+  premiumInfo         PremiumUser?
+  adminActions        AdminAction[]
+
+  @@index([telegramId, plan, isBanned])
+}
+
+model Job {
+  id          String     @id @default(uuid())
+  userId      Int
+  user        User       @relation(fields: [userId], references: [id])
+  url         String
+  provider    String     // e.g., "TERABOX", "DISKWALA"
+  fileName    String?
+  fileSize    BigInt?
+  status      String     // PENDING, VERIFYING, QUEUED, PROCESSING, UPLOADING, COMPLETED, FAILED, CANCELLED, EXPIRED
+  errorReason String?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  startedAt   DateTime?
+  completedAt DateTime?
+  expiresAt   DateTime?
+  files       JobFile[]
+
+  @@index([userId, status, createdAt, provider])
+}
+
+model VerificationSession {
+  id                 String    @id @default(uuid())
+  userId             Int
+  user               User      @relation(fields: [userId], references: [id])
+  tokenHash          String    @unique
+  status             String    // NOT_VERIFIED, PENDING, VERIFIED, EXPIRED, USED, CANCELLED
+  shortenerProvider  String?
+  shortenerReference String?
+  usedAt             DateTime?
+  expiresAt          DateTime
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+}
+
+model JobFile {
+  id             String   @id @default(uuid())
+  jobId          String
+  job            Job      @relation(fields: [jobId], references: [id])
+  fileName       String
+  fileSize       BigInt?
+  telegramFileId String?
+  status         String   // PENDING, UPLOADING, COMPLETED, FAILED
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model UserUsage {
+  id                 Int      @id @default(autoincrement())
+  userId             Int      @unique
+  user               User     @relation(fields: [userId], references: [id])
+  dailyRequests      Int      @default(0)
+  successfulRequests Int      @default(0)
+  failedRequests     Int      @default(0)
+  totalBytes         BigInt   @default(0)
+  totalFiles         Int      @default(0)
+  dailyBytes         BigInt   @default(0)
+  dailyFiles         Int      @default(0)
+  lastResetDate      DateTime @default(now())
+}
+
+model PremiumUser {
+  id          Int      @id @default(autoincrement())
+  userId      Int      @unique
+  user        User     @relation(fields: [userId], references: [id])
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+}
+
+model AdminAction {
+  id          Int      @id @default(autoincrement())
+  adminUserId Int
+  adminUser   User     @relation(fields: [adminUserId], references: [id])
+  actionType  String
+  targetId    String?
+  details     String?
+  createdAt   DateTime @default(now())
+}
+
+model BotSetting {
+  key         String   @id
+  value       String
+  updatedAt   DateTime @updatedAt
+}
+
+model StoredFile {
+  id                String   @id @default(uuid())
+  urlHash           String   @unique
+  fileName          String
+  fileSize          BigInt?
+  mimeType          String?
+  telegramFileId    String
+  telegramMessageId Int
+  status            String   @default("ACTIVE")
+  expiresAt         DateTime
+  createdAt         DateTime @default(now())
+
+  @@index([urlHash])
+  @@index([expiresAt])
+}

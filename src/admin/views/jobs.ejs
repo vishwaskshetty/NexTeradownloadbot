@@ -1,0 +1,59 @@
+<% const currentPath = '/admin/jobs'; %>
+<%- include('partials/header', { currentPath }) %>
+
+<div class="mb-8">
+  <h2 class="text-3xl font-bold text-white mb-2">Active Downloads</h2>
+  <p class="text-slate-400">Monitor and manage currently running jobs.</p>
+</div>
+
+<div class="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
+  <div class="overflow-x-auto">
+    <table class="w-full text-left border-collapse">
+      <thead>
+        <tr class="bg-slate-800/50 text-slate-400 text-sm uppercase tracking-wider">
+          <th class="px-6 py-4 font-medium">Job ID</th>
+          <th class="px-6 py-4 font-medium">User ID</th>
+          <th class="px-6 py-4 font-medium">Provider</th>
+          <th class="px-6 py-4 font-medium">Status</th>
+          <th class="px-6 py-4 font-medium">Started At</th>
+          <th class="px-6 py-4 font-medium text-right">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-800/50">
+        <% jobs.forEach(job => { %>
+          <tr class="hover:bg-slate-800/20 transition-colors">
+            <td class="px-6 py-4 text-slate-300 font-mono text-xs"><%= job.id %></td>
+            <td class="px-6 py-4 text-white"><%= job.user?.telegramId || job.userId %></td>
+            <td class="px-6 py-4 text-slate-300"><%= job.provider %></td>
+            <td class="px-6 py-4">
+              <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-orange-500/10 text-orange-400 border border-orange-500/20">
+                <span class="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse"></span>
+                <%= job.status %>
+              </span>
+            </td>
+            <td class="px-6 py-4 text-sm text-slate-400">
+              <%= new Date(job.createdAt).toLocaleString() %>
+            </td>
+            <td class="px-6 py-4 text-right">
+              <form action="/admin/jobs/<%= job.id %>/cancel" method="POST" class="inline">
+                <button type="submit" class="bg-red-500/10 hover:bg-red-500/20 text-red-500 px-3 py-1.5 rounded-lg text-sm font-medium transition" onclick="return confirm('Are you sure you want to cancel this job?')">
+                  Cancel Job
+                </button>
+              </form>
+            </td>
+          </tr>
+        <% }) %>
+        <% if (jobs.length === 0) { %>
+          <tr>
+            <td colspan="6" class="px-6 py-12 text-center">
+              <div class="text-4xl mb-4">✨</div>
+              <div class="text-slate-400 font-medium">No active downloads right now.</div>
+            </td>
+          </tr>
+        <% } %>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<%- include('partials/footer') %>

@@ -1,0 +1,79 @@
+<% const currentPath = '/admin/users'; %>
+<%- include('partials/header', { currentPath }) %>
+
+<div class="mb-8 flex justify-between items-center">
+  <div>
+    <h2 class="text-3xl font-bold text-white mb-2">Users</h2>
+    <p class="text-slate-400">View and manage bot users.</p>
+  </div>
+</div>
+
+<div class="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
+  <div class="overflow-x-auto">
+    <table class="w-full text-left border-collapse">
+      <thead>
+        <tr class="bg-slate-800/50 text-slate-400 text-sm uppercase tracking-wider">
+          <th class="px-6 py-4 font-medium">ID</th>
+          <th class="px-6 py-4 font-medium">Telegram ID</th>
+          <th class="px-6 py-4 font-medium">Username</th>
+          <th class="px-6 py-4 font-medium">Plan</th>
+          <th class="px-6 py-4 font-medium">Status</th>
+          <th class="px-6 py-4 font-medium">Joined</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-800/50">
+        <% users.forEach(user => { %>
+          <tr class="hover:bg-slate-800/20 transition-colors">
+            <td class="px-6 py-4 text-slate-300"><%= user.id %></td>
+            <td class="px-6 py-4 text-white font-medium"><%= user.telegramId %></td>
+            <td class="px-6 py-4">
+              <div class="flex items-center gap-3">
+                <div class="w-8 h-8 rounded-full bg-brand/20 text-brand flex items-center justify-center font-bold text-xs uppercase">
+                  <%= (user.firstName || user.username || 'U')[0] %>
+                </div>
+                <div>
+                  <div class="text-slate-200"><%= user.firstName %> <%= user.lastName || '' %></div>
+                  <% if (user.username) { %>
+                    <div class="text-xs text-slate-500">@<%= user.username %></div>
+                  <% } %>
+                </div>
+              </div>
+            </td>
+            <td class="px-6 py-4">
+              <% if (user.plan === 'PREMIUM') { %>
+                <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-purple-500/10 text-purple-400 border border-purple-500/20">
+                  💎 Premium
+                </span>
+              <% } else { %>
+                <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-slate-500/10 text-slate-400 border border-slate-500/20">
+                  Free
+                </span>
+              <% } %>
+            </td>
+            <td class="px-6 py-4">
+              <% if (user.isBanned) { %>
+                <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-red-500/10 text-red-400 border border-red-500/20">
+                  Banned
+                </span>
+              <% } else { %>
+                <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-green-500/10 text-green-400 border border-green-500/20">
+                  Active
+                </span>
+              <% } %>
+            </td>
+            <td class="px-6 py-4 text-sm text-slate-400">
+              <%= new Date(user.createdAt).toLocaleDateString() %>
+            </td>
+          </tr>
+        <% }) %>
+        <% if (users.length === 0) { %>
+          <tr>
+            <td colspan="6" class="px-6 py-8 text-center text-slate-500">No users found.</td>
+          </tr>
+        <% } %>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<%- include('partials/footer') %>

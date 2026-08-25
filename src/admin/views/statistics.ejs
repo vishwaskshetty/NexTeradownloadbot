@@ -1,0 +1,40 @@
+<% const currentPath = '/admin/statistics'; %>
+<%- include('partials/header', { currentPath }) %>
+
+<div class="mb-8">
+  <h2 class="text-3xl font-bold text-white mb-2">Statistics</h2>
+  <p class="text-slate-400">Detailed metrics and usage analytics.</p>
+</div>
+
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
+  <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+    <h3 class="text-slate-400 mb-1 font-medium">Total Downloads</h3>
+    <div class="text-3xl font-bold text-white"><%= totalDownloads %></div>
+  </div>
+  <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+    <h3 class="text-slate-400 mb-1 font-medium">Successful</h3>
+    <div class="text-3xl font-bold text-green-400"><%= successful %></div>
+  </div>
+  <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+    <h3 class="text-slate-400 mb-1 font-medium">Failed</h3>
+    <div class="text-3xl font-bold text-red-400"><%= failed %></div>
+  </div>
+</div>
+
+<div class="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+  <h3 class="text-xl font-bold text-white mb-6">Traffic Over Time (Mock)</h3>
+  <div class="h-64 flex items-end justify-between gap-2 px-2 pb-2 border-b border-slate-800">
+    <!-- Mock bar chart -->
+    <% for(let i=0; i<14; i++) { 
+         const h = Math.floor(Math.random() * 80) + 10;
+    %>
+      <div class="w-full bg-brand/20 hover:bg-brand/40 transition rounded-t-sm" style="height: <%= h %>%"></div>
+    <% } %>
+  </div>
+  <div class="flex justify-between mt-2 text-xs text-slate-500">
+    <span>14 Days Ago</span>
+    <span>Today</span>
+  </div>
+</div>
+
+<%- include('partials/footer') %>

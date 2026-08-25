@@ -1,0 +1,36 @@
+import { z } from 'zod';
+
+const envSchema = z.object({
+  BOT_TOKEN: z.string().min(1, 'BOT_TOKEN is required'),
+  DATABASE_URL: process.env.NODE_ENV === 'test'
+    ? z.string().default('file:./dev.db')
+    : z.string().url('DATABASE_URL must be a valid connection string in .env'),
+  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  LOG_LEVEL: z.string().default('info'),
+  SHORTENER_PROVIDER: z.string().default('mock'),
+  SHORTENER_API_KEY: z.string().optional(),
+  VERIFICATION_BASE_URL: z.string().url().default('http://localhost:3000'),
+  VERIFICATION_VALIDITY_MINUTES: z.coerce.number().default(1440),
+  ADMIN_TELEGRAM_IDS: z.string().transform((val) => val.split(',').filter(Boolean).map(Number)).default(''),
+  FREE_DAILY_LIMIT: z.coerce.number().default(5),
+  PREMIUM_DAILY_LIMIT: z.coerce.number().default(50),
+  REDIS_URL: process.env.NODE_ENV === 'test' 
+    ? z.string().default('redis://127.0.0.1:6379') 
+    : z.string().url('REDIS_URL must be a valid connection string in .env'),
+  REDIS_TLS: z.coerce.boolean().default(false),
+  WORKER_CONCURRENCY: z.coerce.number().default(2),
+  MAX_QUEUE_SIZE: z.coerce.number().default(100),
+  MAX_ACTIVE_JOBS_PER_USER: z.coerce.number().default(1),
+  JOB_TIMEOUT_MS: z.coerce.number().default(1800000), // 30m default
+  STORAGE_CHANNEL_ID: z.string().optional(),
+  STORAGE_RETENTION_HOURS: z.coerce.number().default(24),
+});
+
+const _env = envSchema.safeParse(process.env);
+
+if (!_env.success) {
+  console.error('❌ Invalid environment variables:', _env.error.format());
+  process.exit(1);
+}
+
+export const config = _env.data;

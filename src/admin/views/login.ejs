@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin Login - NexTeraDownloadBot</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: { extend: { colors: { brand: '#3b82f6', darker: '#020617' } } }
+    }
+  </script>
+</head>
+<body class="bg-darker text-slate-300 min-h-screen flex items-center justify-center p-4">
+  <div class="bg-slate-900 border border-slate-800 p-8 rounded-2xl w-full max-w-md text-center shadow-2xl">
+    <div class="w-16 h-16 bg-brand/20 text-brand rounded-2xl flex items-center justify-center mx-auto mb-6 text-3xl">🛡️</div>
+    <h1 class="text-2xl font-bold text-white mb-2">Admin Panel Access</h1>
+    <p class="text-slate-400 mb-8">Access is restricted to authorized administrators only.</p>
+    
+    <% if (error) { %>
+      <div class="bg-red-500/10 border border-red-500/30 text-red-400 p-4 rounded-xl mb-6 text-sm">
+        <%= error %>
+      </div>
+    <% } %>
+
+    <div class="bg-slate-800 p-4 rounded-xl text-sm text-left">
+      <h3 class="text-white font-medium mb-2">How to login:</h3>
+      <ol class="list-decimal list-inside space-y-2 text-slate-400">
+        <li>Open your Telegram App</li>
+        <li>Go to <strong>@NexTeraDownloadBot</strong></li>
+        <li>Send the command <code class="bg-slate-700 px-2 py-0.5 rounded text-white">/adminpanel</code></li>
+        <li>Click the secure login link provided by the bot</li>
+      </ol>
+    </div>
+  </div>
+</body>
+</html>
