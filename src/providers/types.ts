@@ -8,6 +8,7 @@ export interface ResolvedFile extends FileInfo {
   provider: string;
   sourceUrl: string;
   downloadUrl: string;
+  headers?: Record<string, string>;
   expiresAt?: Date;
 }
 

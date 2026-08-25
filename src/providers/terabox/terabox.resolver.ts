@@ -33,6 +33,7 @@ export interface TeraBoxResolvedFile {
   mimeType: string;
   downloadUrl: string;
   sourceUrl: string;
+  headers?: Record<string, string>;
   isUnofficial?: boolean;
 }
 
@@ -53,11 +54,6 @@ export const TERABOX_DOMAINS = [
   'momole.com',
   'gibox.com',
 ];
-
-/**
- * In-memory fallback cache in case Redis is unavailable
- */
-const inMemoryCache = new Map<string, { data: TeraBoxResolvedFile; expiresAt: number }>();
 
 /**
  * Validates domain and guards against SSRF (blocking localhost, private IP ranges, etc.)
@@ -144,8 +140,8 @@ export function hasTeraBoxCredentials(): boolean {
 
 export class TeraBoxResolver {
   private readonly OFFICIAL_API_BASE = 'https://openapi.terabox.com';
-  private readonly UNOFFICIAL_API_BASE = 'https://www.terabox.com';
-  private readonly REQUEST_TIMEOUT_MS = 10000;
+  private readonly UNOFFICIAL_API_BASE = 'https://www.terabox.app';
+  private readonly REQUEST_TIMEOUT_MS = 15000;
   private readonly MAX_RETRIES = 2;
 
   /**
@@ -166,9 +162,10 @@ export class TeraBoxResolver {
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://www.terabox.app/',
             ...(options.headers || {}),
           },
-          maxRedirects: 3,
+          maxRedirects: 5,
         });
         clearTimeout(timer);
         return response.data;
@@ -179,12 +176,11 @@ export class TeraBoxResolver {
         const isAxiosErr = axios.isAxiosError(err);
         const status = isAxiosErr ? err.response?.status : undefined;
 
-        // Do NOT retry 4xx errors or invalid URL issues
+        // Do NOT retry 4xx errors
         if (status && status >= 400 && status < 500) {
           throw err;
         }
 
-        // Retry only on temporary network failures or 5xx server errors
         if (attempt <= this.MAX_RETRIES) {
           const delay = attempt * 1500;
           logger.warn(`[TeraBoxResolver] Network attempt ${attempt} failed (${err.message}). Retrying in ${delay}ms...`);
@@ -208,6 +204,8 @@ export class TeraBoxResolver {
     if (!shareCode) {
       throw new InvalidUrlError('❌ Unsupported TeraBox link');
     }
+
+    logger.info(`[TeraBox] Resolving share URL code: ${shareCode}`);
 
     // Check cache
     const cacheKey = `terabox:meta_list:${shareCode}`;
@@ -234,7 +232,7 @@ export class TeraBoxResolver {
     }
 
     if (fileList.length === 0) {
-      // Unofficial metadata fetch
+      // Unofficial metadata fetch via TeraBox shorturlinfo
       const infoUrl = `${this.UNOFFICIAL_API_BASE}/api/shorturlinfo`;
       try {
         const data = await this.safeFetch(infoUrl, {
@@ -263,6 +261,9 @@ export class TeraBoxResolver {
     if (fileList.length === 0) {
       throw new NotFoundError('❌ File is unavailable or private');
     }
+
+    const firstFile = fileList[0];
+    logger.info(`[TeraBox] File identified: "${firstFile.server_filename || firstFile.filename}" (Expected size: ${firstFile.size || 'unknown'})`);
 
     const metadata: TeraBoxShareMetadata = {
       surl: shareCode,
@@ -310,18 +311,27 @@ export class TeraBoxResolver {
       downloadUrl = `${this.UNOFFICIAL_API_BASE}/share/download?surl=${shareCode}&fs_id=${file.fs_id}`;
     }
 
+    logger.info(`[TeraBox] Direct download URL obtained for "${fileName}" (${fileSize} bytes)`);
+
+    const headers: Record<string, string> = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      'Referer': 'https://www.terabox.app/',
+      'Accept': '*/*',
+    };
+
     return {
       fileName,
       fileSize,
       mimeType,
       downloadUrl,
       sourceUrl: url,
+      headers,
       isUnofficial: !hasTeraBoxCredentials(),
     };
   }
 
   /**
-   * Resolve public link metadata & download URL safely with caching
+   * Resolve public link metadata & download URL safely
    */
   async resolvePublicLink(url: string): Promise<TeraBoxResolvedFile> {
     return this.resolveSelectedFile(url);
@@ -362,3 +372,5 @@ export class TeraBoxResolver {
     return (category && map[category]) || 'application/octet-stream';
   }
 }
+
+export const teraBoxResolver = new TeraBoxResolver();

@@ -2,14 +2,6 @@ import { DownloadProvider, FileInfo, ResolvedFile } from '../types';
 import { TeraBoxResolver, isSafeTeraBoxUrl, hasTeraBoxCredentials, TeraBoxShareMetadata } from './terabox.resolver';
 import { InvalidUrlError } from '../errors';
 
-/**
- * TeraBoxProvider encapsulates both official TeraBox Open Platform API logic
- * and isolated fallback resolution.
- *
- * If official API credentials (client ID, client secret, access token) are set in .env,
- * it utilizes official endpoints. Otherwise, it isolates reverse-engineered/unofficial
- * public link resolution behind this Provider interface so it can be swapped effortlessly.
- */
 export class TeraBoxProvider implements DownloadProvider {
   public readonly name = 'TeraBox';
 
@@ -69,6 +61,7 @@ export class TeraBoxProvider implements DownloadProvider {
       fileSize: result.fileSize,
       mimeType: result.mimeType,
       downloadUrl: result.downloadUrl,
+      headers: result.headers,
     };
   }
 

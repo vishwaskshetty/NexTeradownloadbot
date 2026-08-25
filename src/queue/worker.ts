@@ -18,12 +18,84 @@ let downloadWorker: Worker | null = null;
 
 function formatBytes(bytes: number | bigint): string {
   const num = Number(bytes);
-  if (!num || num === 0) return 'Unknown size';
+  if (!num || num === 0) return '0 B';
   const k = 1024;
   const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
   const i = Math.floor(Math.log(num) / Math.log(k));
   return parseFloat((num / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
+
+/**
+ * Validates downloaded local file integrity:
+ * Verifies file exists, actual size is at least 1 KB, content is not HTML/JSON error page,
+ * and actual size matches expected provider metadata.
+ */
+
+export interface ValidationResult {
+  valid: boolean;
+  actualSize: number;
+  reason?: string;
+}
+
+export const validateDownloadedFile = async (
+  filePath: string,
+  expectedSize?: number
+): Promise<ValidationResult> => {
+  if (!fs.existsSync(filePath)) {
+    return { valid: false, actualSize: 0, reason: 'Temporary file does not exist' };
+  }
+
+  const stat = fs.statSync(filePath);
+  const actualSize = stat.size;
+
+  // 1. Minimum size guard (e.g. 117 B response is rejected)
+  if (actualSize < 1024) {
+    return {
+      valid: false,
+      actualSize,
+      reason: `File size too small (${actualSize} B). Minimum required is 1024 B.`
+    };
+  }
+
+  // 2. Read first 512 bytes to inspect magic header content
+  const fd = fs.openSync(filePath, 'r');
+  const buffer = Buffer.alloc(512);
+  const bytesRead = fs.readSync(fd, buffer, 0, 512, 0);
+  fs.closeSync(fd);
+
+  const headerStr = buffer.toString('utf8', 0, bytesRead).trim();
+
+  if (
+    headerStr.startsWith('{"errno"') ||
+    headerStr.startsWith('{"error"') ||
+    headerStr.startsWith('{"status"') ||
+    headerStr.startsWith('{"msg"') ||
+    headerStr.toLowerCase().startsWith('<!doctype') ||
+    headerStr.toLowerCase().startsWith('<html') ||
+    headerStr.toLowerCase().startsWith('<body') ||
+    headerStr.includes('Access Denied') ||
+    headerStr.includes('Unauthorized')
+  ) {
+    return {
+      valid: false,
+      actualSize,
+      reason: `Downloaded content is an HTML/JSON error page rather than a valid file (${actualSize} B).`
+    };
+  }
+
+  // 3. Expected vs Actual size match (if expected size > 10 MB and actual size < 50% expected)
+  if (expectedSize && expectedSize > 10 * 1024 * 1024) {
+    if (actualSize < 0.5 * expectedSize) {
+      return {
+        valid: false,
+        actualSize,
+        reason: `Downloaded file size (${formatBytes(actualSize)}) is significantly smaller than expected metadata size (${formatBytes(expectedSize)}).`
+      };
+    }
+  }
+
+  return { valid: true, actualSize };
+};
 
 /**
  * Smart media detection helper:
@@ -88,39 +160,55 @@ const sendMediaToTelegram = async (
   return await bot.telegram.sendDocument(telegramId, mediaSource, extraOptions);
 };
 
-const downloadFile = async (url: string, destPath: string): Promise<void> => {
+/**
+ * Downloads direct URL to disk via stream with progress logging & custom headers
+ */
+const downloadFileStream = async (
+  url: string,
+  destPath: string,
+  headers?: Record<string, string>
+): Promise<number> => {
+  logger.info(`[Download] Starting download stream to ${destPath}`);
+
   const writer = fs.createWriteStream(destPath);
   const response = await axios({
     url,
     method: 'GET',
     responseType: 'stream',
-    timeout: 30000,
+    timeout: 60000,
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      'Referer': 'https://www.terabox.app/',
+      'Accept': '*/*',
+      ...(headers || {})
+    },
+    maxRedirects: 5,
+  });
+
+  let downloadedBytes = 0;
+  let lastLoggedMb = 0;
+
+  response.data.on('data', (chunk: Buffer) => {
+    downloadedBytes += chunk.length;
+    const mb = Math.floor(downloadedBytes / (50 * 1024 * 1024)) * 50;
+    if (mb > lastLoggedMb) {
+      logger.info(`[Download] Received: ${formatBytes(downloadedBytes)}`);
+      lastLoggedMb = mb;
+    }
   });
 
   response.data.pipe(writer);
 
   return new Promise((resolve, reject) => {
-    writer.on('finish', resolve);
-    writer.on('error', reject);
+    writer.on('finish', () => {
+      logger.info(`[Download] Download completed (${formatBytes(downloadedBytes)})`);
+      resolve(downloadedBytes);
+    });
+    writer.on('error', (err) => {
+      logger.error(`[Download] Stream error: ${err.message}`);
+      reject(err);
+    });
   });
-};
-
-const withRetry = async <T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> => {
-  let attempt = 0;
-  while (attempt < maxRetries) {
-    try {
-      return await fn();
-    } catch (err: any) {
-      attempt++;
-      if (attempt >= maxRetries) {
-        throw err;
-      }
-      const delayMs = attempt === 1 ? 2000 : attempt === 2 ? 5000 : 10000;
-      logger.warn(`Attempt ${attempt} failed, retrying in ${delayMs}ms: ${err.message}`);
-      await new Promise(r => setTimeout(r, delayMs));
-    }
-  }
-  throw new Error('Unreachable');
 };
 
 export const initWorker = () => {
@@ -199,15 +287,13 @@ export const initWorker = () => {
         await jobService.updateJobStatus(jobId, 'SENDING');
 
         // Deliver cached file to user using smart media type helper
-        await withRetry(async () => {
-          await sendMediaToTelegram(
-            telegramId!,
-            cachedFile.telegramFileId,
-            cachedFile.fileName,
-            `✅ Download completed!\n🔗 Provider: ${adapter.name}\n⚡ Fast Cached Delivery`,
-            cachedFile.mimeType || undefined
-          );
-        }, 3);
+        await sendMediaToTelegram(
+          telegramId!,
+          cachedFile.telegramFileId,
+          cachedFile.fileName,
+          `✅ Download completed!\n🔗 Provider: ${adapter.name}\n⚡ Fast Cached Delivery`,
+          cachedFile.mimeType || undefined
+        );
 
         // ATOMIC & IDEMPOTENT COMPLETION: Increments usage ONLY ONCE upon successful delivery
         await jobService.completeJob(jobId, cachedFile.fileSize || 0n);
@@ -226,25 +312,66 @@ export const initWorker = () => {
         return; // Job is fully done
       }
 
-      // Resolve direct link for single or selected multi-file item
-      const adapterInstance = adapter as any;
-      const resolvedFile = typeof adapterInstance.resolveSelectedFile === 'function'
-        ? await adapterInstance.resolveSelectedFile(url, fsId)
-        : await adapter.resolve(url);
-      
+      // Retry Loop with Fresh URL Resolution & Strict File Validation
+      let resolvedFile: any = null;
+      let validation: ValidationResult = { valid: false, actualSize: 0 };
+      const maxRetries = 3;
+
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        // Resolve direct link for single or selected multi-file item
+        const adapterInstance = adapter as any;
+        resolvedFile = typeof adapterInstance.resolveSelectedFile === 'function'
+          ? await adapterInstance.resolveSelectedFile(url, fsId)
+          : await adapter.resolve(url);
+
+        const filename = resolvedFile.fileName || 'downloaded_file';
+        const expectedSize = resolvedFile.fileSize;
+
+        // Update single status message: File found & Downloading
+        await updateStatusMessage(
+          `📄 *File found*\n` +
+          `📁 \`${filename}\`\n` +
+          `📦 ${formatBytes(expectedSize)}\n\n` +
+          `⬇️ *Downloading...* (Attempt ${attempt}/${maxRetries})`
+        );
+
+        // Prepare safe temp file path
+        if (tempFilePath && fs.existsSync(tempFilePath)) {
+          try { fs.unlinkSync(tempFilePath); } catch (e) {}
+        }
+        const safeName = filename.replace(/[^a-zA-Z0-9_.-]/g, '_');
+        tempFilePath = path.join(os.tmpdir(), `nextera_${jobId}_${Date.now()}_${safeName}`);
+
+        try {
+          await downloadFileStream(resolvedFile.downloadUrl, tempFilePath, resolvedFile.headers);
+        } catch (dlErr: any) {
+          logger.warn(`[Download] Stream attempt ${attempt} failed: ${dlErr.message}`);
+        }
+
+        // Strict File Validation Check
+        validation = await validateDownloadedFile(tempFilePath, expectedSize);
+
+        if (validation.valid) {
+          logger.info(`[Validation] Expected: ${formatBytes(expectedSize)}, Actual: ${formatBytes(validation.actualSize)}, Integrity: OK`);
+          break; // File is valid! Exit retry loop
+        } else {
+          logger.error(`[Validation] Expected: ${formatBytes(expectedSize)}, Actual: ${formatBytes(validation.actualSize)}, Integrity: FAILED (${validation.reason}). Retrying fresh URL ${attempt}/${maxRetries}...`);
+          if (tempFilePath && fs.existsSync(tempFilePath)) {
+            try { fs.unlinkSync(tempFilePath); } catch (e) {}
+          }
+          if (attempt < maxRetries) {
+            await new Promise(r => setTimeout(r, 2000 * attempt));
+          }
+        }
+      }
+
+      // If all 3 attempts failed validation: abort job without sending file or incrementing usage
+      if (!validation.valid) {
+        throw new ProviderError(`Validation failed: ${validation.reason || 'File integrity check failed.'}`);
+      }
+
       const filename = resolvedFile.fileName || 'downloaded_file';
-
-      // Update single status message: File found & Downloading
-      await updateStatusMessage(
-        `📄 *File found*\n` +
-        `📁 \`${filename}\`\n` +
-        `📦 ${formatBytes(resolvedFile.fileSize)}\n\n` +
-        `⬇️ *Downloading...*`
-      );
-
-      // Download file to temp directory
-      tempFilePath = path.join(os.tmpdir(), `nextera_${jobId}_${Date.now()}_${filename}`);
-      await withRetry(() => downloadFile(resolvedFile.downloadUrl, tempFilePath!), 3);
+      const actualSize = validation.actualSize;
 
       // Status: PROCESSING -> FILE_READY
       await jobService.updateJobStatus(jobId, 'FILE_READY');
@@ -253,7 +380,7 @@ export const initWorker = () => {
       await updateStatusMessage(
         `📤 *Uploading to Telegram...*\n\n` +
         `📁 \`${filename}\`\n` +
-        `📦 ${formatBytes(resolvedFile.fileSize)}`
+        `📦 ${formatBytes(actualSize)}`
       );
 
       let sentToUser: any = null;
@@ -264,27 +391,25 @@ export const initWorker = () => {
       // Upload file to Telegram storage channel cache if configured
       if (config.STORAGE_CHANNEL_ID) {
         try {
-          const storedMessage = await withRetry(async () => {
-            return await bot.telegram.sendDocument(config.STORAGE_CHANNEL_ID!, {
-              source: tempFilePath!,
-              filename
-            }, {
-              caption: `Source: ${url}`
-            });
-          }, 3);
+          logger.info(`[Telegram] Uploading actual file (${formatBytes(actualSize)}) to storage channel...`);
+          const storedMessage = await bot.telegram.sendDocument(config.STORAGE_CHANNEL_ID!, {
+            source: tempFilePath!,
+            filename
+          }, {
+            caption: `Source: ${url}`
+          });
 
           const telegramFileId = storedMessage.document?.file_id;
           if (telegramFileId) {
+            logger.info(`[Telegram] Storage upload successful. File ID: ${telegramFileId.substring(0, 10)}...`);
             // Send to user using cached telegramFileId and smart media helper
-            sentToUser = await withRetry(async () => {
-              return await sendMediaToTelegram(
-                telegramId!,
-                telegramFileId,
-                filename,
-                `✅ Download completed!\n🔗 Provider: ${adapter.name}`,
-                resolvedFile.mimeType
-              );
-            }, 3);
+            sentToUser = await sendMediaToTelegram(
+              telegramId!,
+              telegramFileId,
+              filename,
+              `✅ Download completed!\n🔗 Provider: ${adapter.name}`,
+              resolvedFile.mimeType
+            );
 
             // Save to PostgreSQL Cache
             const expiresAt = new Date();
@@ -297,7 +422,7 @@ export const initWorker = () => {
                 telegramMessageId: storedMessage.message_id,
                 expiresAt,
                 fileName: filename,
-                fileSize: resolvedFile.fileSize,
+                fileSize: BigInt(actualSize),
                 mimeType: resolvedFile.mimeType,
                 status: 'ACTIVE'
               },
@@ -307,7 +432,7 @@ export const initWorker = () => {
                 telegramMessageId: storedMessage.message_id,
                 expiresAt,
                 fileName: filename,
-                fileSize: resolvedFile.fileSize,
+                fileSize: BigInt(actualSize),
                 mimeType: resolvedFile.mimeType,
                 status: 'ACTIVE'
               }
@@ -320,19 +445,20 @@ export const initWorker = () => {
       
       // If direct user upload is needed
       if (!sentToUser) {
-        sentToUser = await withRetry(async () => {
-          return await sendMediaToTelegram(
-            telegramId!,
-            { source: tempFilePath!, filename },
-            filename,
-            `✅ Download completed!\n🔗 Provider: ${adapter.name}`,
-            resolvedFile.mimeType
-          );
-        }, 3);
+        logger.info(`[Telegram] Uploading actual file (${formatBytes(actualSize)}) directly to user ${telegramId}...`);
+        sentToUser = await sendMediaToTelegram(
+          telegramId!,
+          { source: tempFilePath!, filename },
+          filename,
+          `✅ Download completed!\n🔗 Provider: ${adapter.name}`,
+          resolvedFile.mimeType
+        );
+        logger.info(`[Telegram] Direct upload successful.`);
       }
 
       // ATOMIC COMPLETION: Increments daily usage ONLY AFTER successful file delivery to user
-      await jobService.completeJob(jobId, BigInt(resolvedFile.fileSize || 0));
+      await jobService.completeJob(jobId, BigInt(actualSize));
+      logger.info(`[Usage] Download completed and counted for user ${user.id}.`);
 
       const updatedUsage = await usageService.getUsage(user.id);
       const remaining = Math.max(0, dailyLimit - updatedUsage.dailyRequests);
@@ -341,7 +467,7 @@ export const initWorker = () => {
       const finalSuccessMsg =
         `✅ *DOWNLOAD COMPLETE*\n\n` +
         `📁 File: \`${filename}\`\n` +
-        `📦 Size: ${formatBytes(resolvedFile.fileSize)}\n` +
+        `📦 Size: ${formatBytes(actualSize)}\n` +
         `⚡ Provider: ${adapter.name}\n\n` +
         `📊 Daily usage: ${updatedUsage.dailyRequests}/${dailyLimit}\n` +
         `📥 Remaining: ${remaining}`;
@@ -353,8 +479,8 @@ export const initWorker = () => {
       
       let userMsg =
         `❌ *DOWNLOAD FAILED*\n\n` +
-        `🔗 Source: ${url.substring(0, 30)}...\n\n` +
-        `⚠️ ${error.message || 'Unable to download this file.'}\n\n` +
+        `🔗 Source: TeraBox\n\n` +
+        `⚠️ ${error.message || 'Unable to download this file completely.'}\n\n` +
         `No usage was consumed.`;
 
       if (isUploadError) {
