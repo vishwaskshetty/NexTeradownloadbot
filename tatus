@@ -1,0 +1,45 @@
+[1mdiff --git a/.env.example b/.env.example[m
+[1mindex 18ccafc..2e7009e 100644[m
+[1m--- a/.env.example[m
+[1m+++ b/.env.example[m
+[36m@@ -1,27 +1,26 @@[m
+[31m-BOT_TOKEN=8423940918:AAFwXRllrT6AYoL94X16JdImYncTDgV8Rdo[m
+[31m-DATABASE_URL=postgresql://postgres.mbzobmfpywywvednquzp:%40NexTeraDownloadBot@aws-0-ap-southeast-2.pooler.supabase.com:5432/postgres[m
+[32m+[m[32mBOT_TOKEN=your_telegram_bot_token[m
+ [m
+[31m-# Redis Configuration (For Upstash/Production use rediss:// and set REDIS_TLS=true if needed)[m
+[31m-# Format: redis://[password]@[host]:[port][m
+[31m-REDIS_URL=redis://default:gQAAAAAAAeQXAAIgcDI1MmMzOTMwNDNjZTU0ZGQ0OGJiMzFlY2JmNTA5NzgyNA@immune-bluegill-123927.upstash.io:6379[m
+[32m+[m[32mDATABASE_URL=your_supabase_postgresql_connection_string[m
+[32m+[m
+[32m+[m[32mREDIS_URL=your_upstash_redis_url[m
+ REDIS_TLS=true[m
+ [m
+ SHORTENER_PROVIDER=arolinks[m
+[31m-SHORTENER_API_KEY=4780377385c2bd34e57325748fd7dc8061218306[m
+[32m+[m[32mSHORTENER_API_KEY=your_arolinks_api_key[m
+ [m
+[31m-VERIFICATION_BASE_URL=http://localhost:3000[m
+[32m+[m[32mVERIFICATION_BASE_URL=https://your-verification-domain.com[m
+ VERIFICATION_VALIDITY_MINUTES=1440[m
+ [m
+[31m-ADMIN_TELEGRAM_IDS=6059191947[m
+[32m+[m[32mADMIN_TELEGRAM_IDS=your_telegram_id[m
+ [m
+ FREE_DAILY_LIMIT=5[m
+ PREMIUM_DAILY_LIMIT=50[m
+ [m
+ # Storage[m
+[31m-STORAGE_CHANNEL_ID=-1003975811732[m
+[32m+[m[32mSTORAGE_CHANNEL_ID=your_storage_channel_id[m
+ STORAGE_RETENTION_HOURS=24[m
+ [m
+[31m-# TeraBox Official API (Required for actual file extraction)[m
+[31m-TERABOX_CLIENT_ID=<TERABOX_CLIENT_ID>[m
+[31m-TERABOX_CLIENT_SECRET=<TERABOX_CLIENT_SECRET>[m
+[31m-TERABOX_ACCESS_TOKEN=<TERABOX_ACCESS_TOKEN>[m
+[32m+[m[32m# TeraBox Official API[m
+[32m+[m[32mTERABOX_CLIENT_ID=your_terabox_client_id[m
+[32m+[m[32mTERABOX_CLIENT_SECRET=your_terabox_client_secret[m
+[32m+[m[32mTERABOX_ACCESS_TOKEN=your_terabox_access_token[m
+\ No newline at end of file[m
