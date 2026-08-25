@@ -134,8 +134,8 @@ export const messageHandler = async (ctx: Context) => {
       const priority = user.plan === 'PREMIUM' ? 1 : 5;
       
       const activeCount = await jobQueue.getActiveCount();
-      await ctx.reply(
-        `⏳ *PROCESSING YOUR LINK*\n\n🔗 Source: ${adapterInfo.providerName}\n⚡ Status: Added to queue\n\n📍 Position: #${waitingCount + 1}\n⚡ Active Jobs: ${activeCount}\n\nI'll notify you when your file is ready.`,
+      const statusMsg = await ctx.reply(
+        `⏳ *PROCESSING YOUR LINK*\n\n🔗 Source: ${adapterInfo.providerName}\n⚡ Status: Added to queue\n\n📍 Position: #${waitingCount + 1}\n⚡ Active Jobs: ${activeCount}`,
         {
           parse_mode: 'Markdown',
           ...getJobKeyboard(job.id)
@@ -146,7 +146,8 @@ export const messageHandler = async (ctx: Context) => {
       await jobQueue.add('processDownload', {
         jobId: job.id,
         url: text,
-        userId: user.id
+        userId: user.id,
+        statusMessageId: statusMsg.message_id
       }, { priority });
       
     } catch (error: any) {

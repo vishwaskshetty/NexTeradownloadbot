@@ -442,7 +442,8 @@ We couldn't create your verification link right now. Please try again in a momen
           jobId: job.id,
           url: job.url,
           userId: user.id,
-          fsId
+          fsId,
+          statusMessageId: ctx.callbackQuery?.message?.message_id
         }, { priority });
 
       } catch (err: any) {
@@ -537,7 +538,8 @@ Please open the verification link below and complete verification to get your fi
         await jobQueue.add('processDownload', {
           jobId: job.id,
           url: job.url,
-          userId: user.id
+          userId: user.id,
+          statusMessageId: ctx.callbackQuery?.message?.message_id
         }, { priority });
 
       } catch (err: any) {
