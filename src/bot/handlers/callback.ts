@@ -1,4 +1,5 @@
 import { Context } from 'telegraf';
+import type { Job, User, UserUsage } from '@prisma/client';
 import { userService } from '../../services/UserService';
 import { usageService } from '../../services/UsageService';
 import { jobService } from '../../services/JobService';
@@ -8,6 +9,7 @@ import {
   getBackKeyboard, 
   getMainKeyboard, 
   getAccountKeyboard,
+  getMyStatusKeyboard,
   getVerificationRequiredKeyboard,
   getVerifiedKeyboard
 } from '../keyboards/mainKeyboard';
@@ -17,7 +19,8 @@ import {
   getAdminShortenerKeyboard, 
   getAdminPremiumKeyboard,
   getAdminStorageKeyboard,
-  getAdminJobsKeyboard
+  getAdminJobsKeyboard,
+  getAdminBroadcastKeyboard
 } from '../keyboards/adminKeyboard';
 import { getMainMenuText } from '../commands/start';
 import { config } from '../../config';
@@ -25,22 +28,42 @@ import { getShortenerProvider } from '../../verification/shortener.service';
 import { db } from '../../db';
 import { redis } from '../../redis';
 import { bot } from '../../bot';
+import { logger } from '../../utils/logger';
 import { Markup } from 'telegraf';
 
+/**
+ * Escapes reserved Markdown characters to prevent Telegram 400 Bad Request errors.
+ */
+function escapeMarkdown(text: string): string {
+  return text.replace(/[_*`\[\]]/g, '\\$&');
+}
+
 export const callbackHandler = async (ctx: Context): Promise<void> => {
+  // @ts-ignore
+  const data: string | undefined = ctx.callbackQuery?.data;
+  const user = ctx.state?.user;
+
+  if (!data || !user) return;
+
+  // Immediately answer callback query to keep Telegram snappy & avoid spinning loader
   try {
-    // @ts-ignore
-    const data = ctx.callbackQuery?.data;
-    const user = ctx.state.user;
-
-    if (!data || !user) return;
-
-    // Immediately answer callback query to keep Telegram snappy
     if (!data.startsWith('cancel_')) {
       await ctx.answerCbQuery().catch(() => {});
     }
+  } catch {}
 
+  try {
     const isAdmin = adminService.isAdmin(user.telegramId);
+
+    // ----------------- NON-ADMIN ACCESS GUARD -----------------
+    if (!isAdmin && data.startsWith('admin_')) {
+      await ctx.answerCbQuery('⛔ ACCESS DENIED: Administrator permissions required.', { show_alert: true }).catch(() => {});
+      await ctx.editMessageText(`❌ *ACCESS DENIED*\n\nYou do not have permission to access the Administrator Panel.`, {
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: [[{ text: '🏠 Main Menu', callback_data: 'main_menu' }]] }
+      }).catch(() => {});
+      return;
+    }
 
     // ----------------- USER MENUS -----------------
     if (data === 'main_menu') {
@@ -49,54 +72,112 @@ export const callbackHandler = async (ctx: Context): Promise<void> => {
       await ctx.editMessageText(getMainMenuText(), {
         parse_mode: 'Markdown',
         ...getMainKeyboard(isAdmin, showVerification)
-      }).catch(() => {});
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
     }
+
     else if (data === 'download') {
       const text = `
-📥 *Download*
+📥 *DOWNLOAD FILE*
 
-Send me a supported link.
+Send me a supported link to process your download.
 
-Supported sources:
-• TeraBox
-• Diskwala`;
+*Supported Platforms:*
+• 🔵 TeraBox (\`terabox.com\`, \`1024terabox.com\`, etc.)
+• 🟢 Diskwala (\`diskwala.com\`)
+
+⚡ Processing will start automatically after sending the URL.`;
+
       await ctx.editMessageText(text, {
         parse_mode: 'Markdown',
-        ...getBackKeyboard()
-      }).catch(() => {});
+        ...getBackKeyboard('main_menu')
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
     }
+
     else if (data === 'account') {
       const usage = await usageService.getUsage(user.id);
       const dailyLimit = await usageService.getDailyLimit(user.plan);
       const isVerified = await verificationService.isUserVerified(user.id);
+      const remaining = Math.max(0, dailyLimit - usage.dailyRequests);
+      const regDate = user.createdAt ? new Date(user.createdAt).toLocaleDateString() : 'N/A';
+      const displayName = escapeMarkdown(user.username ? `@${user.username}` : (user.firstName || 'User'));
 
       const text = `
-👤 *ACCOUNT*
+👤 *ACCOUNT INFO*
 
-🆔 User ID: \`${user.telegramId}\`
-⭐ Premium: ${user.plan === 'PREMIUM' ? 'Enabled' : 'Disabled'}
-📅 Daily limit: ${dailyLimit}
-📥 Downloads today: ${usage.dailyRequests}/${dailyLimit}
-🔐 Verification: ${isVerified ? 'Verified' : 'Not Verified'}`;
-      
+🆔 *Telegram ID:* \`${user.telegramId}\`
+👤 *Username:* ${displayName}
+⭐ *Premium:* ${user.plan === 'PREMIUM' ? '🟢 Enabled' : '🔴 Disabled'}
+🔐 *Verification:* ${isVerified ? '✅ Verified' : '❌ Not Verified'}
+📥 *Daily Limit:* ${dailyLimit} downloads/day
+📊 *Used Today:* ${usage.dailyRequests} / ${dailyLimit}
+⏳ *Remaining:* ${remaining} downloads
+📅 *Registered:* ${regDate}`;
+
       await ctx.editMessageText(text, {
         parse_mode: 'Markdown',
         ...getAccountKeyboard()
-      }).catch(() => {});
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
     }
+
+    else if (data === 'my_status') {
+      const usage = await usageService.getUsage(user.id);
+      const dailyLimit = await usageService.getDailyLimit(user.plan);
+      const isVerified = await verificationService.isUserVerified(user.id);
+      const remaining = Math.max(0, dailyLimit - usage.dailyRequests);
+      const displayName = escapeMarkdown(user.username ? `@${user.username}` : (user.firstName || user.telegramId.toString()));
+
+      // Check active job
+      const activeJob = await db.job.findFirst({
+        where: {
+          userId: user.id,
+          status: { in: ['PENDING', 'QUEUED', 'PROCESSING', 'UPLOADING'] }
+        },
+        orderBy: { createdAt: 'desc' }
+      });
+
+      let jobStatusStr = 'None';
+      if (activeJob) {
+        jobStatusStr = `Job #${activeJob.id.substring(0, 6)} (${activeJob.status})`;
+      }
+
+      const text = `
+📊 *MY STATUS*
+
+👤 *Account:* ${displayName} (\`${user.telegramId}\`)
+🔐 *Verification:* ${isVerified ? '✅ Verified' : '❌ Not Verified'}
+⭐ *Premium:* ${user.plan === 'PREMIUM' ? '🟢 Enabled' : '🔴 Disabled'}
+📥 *Daily Usage:* ${usage.dailyRequests} / ${dailyLimit}
+⏳ *Remaining Downloads:* ${remaining}
+⚡ *Active Job:* ${jobStatusStr}`;
+
+      await ctx.editMessageText(text, {
+        parse_mode: 'Markdown',
+        ...getMyStatusKeyboard()
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
+    }
+
     else if (data === 'verification' || data === 'verify_check') {
       const isEnabled = await adminService.getVerificationStatus();
       if (!isEnabled) {
         await ctx.editMessageText(`
 🔐 *VERIFICATION*
 
-🟢 Verification is currently disabled.
+🟢 Verification is currently disabled by the administrator.
 
-You can use the bot normally without completing
-the verification process.`, {
+You can use the bot normally without completing verification.`, {
           parse_mode: 'Markdown',
-          ...getBackKeyboard()
-        }).catch(() => {});
+          ...getBackKeyboard('account')
+        }).catch((err: any) => {
+          if (!err.message?.includes('message is not modified')) throw err;
+        });
         return;
       }
 
@@ -105,111 +186,349 @@ the verification process.`, {
         await ctx.editMessageText(`
 ✅ *VERIFIED*
 
-Your account has been successfully verified.
-
-You can now use the available download features
-according to your account limits.`, {
+Your account has been successfully verified.`, {
           parse_mode: 'Markdown',
           ...getVerifiedKeyboard()
-        }).catch(() => {});
-      } else {
-        const { shortUrl } = await verificationService.createVerificationFlow(user.id);
-        const markup = getVerificationRequiredKeyboard(shortUrl);
-        
-        if (data === 'verify_check') {
-          await ctx.editMessageText(`
-⚠️ *VERIFICATION NOT COMPLETED*
+        }).catch((err: any) => {
+          if (!err.message?.includes('message is not modified')) throw err;
+        });
+        return;
+      }
 
-We couldn't confirm your verification yet.
+      if (data === 'verify_check') {
+        // Find existing pending session for user
+        const pendingSession = await db.verificationSession.findFirst({
+          where: { userId: user.id, status: 'PENDING' },
+          orderBy: { createdAt: 'desc' }
+        });
 
-Please complete the verification process first,
-then press "Check Verification" again.`, {
-            parse_mode: 'Markdown',
-            ...markup
-          }).catch(() => {});
+        if (pendingSession && pendingSession.expiresAt > new Date()) {
+          const shortUrl = pendingSession.shortenerReference || '';
+          if (shortUrl) {
+            await ctx.editMessageText(`
+🔐 *NOT VERIFIED*
+
+Verification has not been completed yet.`, {
+              parse_mode: 'Markdown',
+              ...getVerificationRequiredKeyboard(shortUrl)
+            }).catch((err: any) => {
+              if (!err.message?.includes('message is not modified')) throw err;
+            });
+          } else {
+            const { shortUrl: newUrl } = await verificationService.createVerificationFlow(user.id, ctx.botInfo?.username);
+            await ctx.editMessageText(`
+🔐 *NOT VERIFIED*
+
+Verification link generated. Please complete verification below.`, {
+              parse_mode: 'Markdown',
+              ...getVerificationRequiredKeyboard(newUrl)
+            }).catch((err: any) => {
+              if (!err.message?.includes('message is not modified')) throw err;
+            });
+          }
         } else {
+          const { getVerificationExpiredKeyboard } = require('../keyboards/mainKeyboard');
           await ctx.editMessageText(`
-🔐 *VERIFICATION REQUIRED*
+⏰ *VERIFICATION EXPIRED*
 
-Please verify your account to unlock downloads.
+Your previous verification link has expired (15-minute limit exceeded).
 
-Verification helps protect the bot from abuse
-and keeps the service available for everyone.
+Create a new verification session to continue.`, {
+            parse_mode: 'Markdown',
+            ...getVerificationExpiredKeyboard()
+          }).catch((err: any) => {
+            if (!err.message?.includes('message is not modified')) throw err;
+          });
+        }
+      } else {
+        // User clicked "Verification" or "Generate New Link"
+        await ctx.editMessageText(`⏳ _Creating your verification link via AroLinks..._`, { parse_mode: 'Markdown' }).catch(() => {});
 
-After successful verification, your access will be
-unlocked automatically.`, {
+        try {
+          const botUsername = ctx.botInfo?.username;
+          const { shortUrl } = await verificationService.createVerificationFlow(user.id, botUsername);
+          const markup = getVerificationRequiredKeyboard(shortUrl);
+
+          await ctx.editMessageText(`
+🔐 *VERIFICATION*
+
+Your verification link is ready.
+
+Please open the link below and complete the verification process.`, {
             parse_mode: 'Markdown',
             ...markup
-          }).catch(() => {});
+          }).catch((err: any) => {
+            if (!err.message?.includes('message is not modified')) throw err;
+          });
+        } catch (linkErr: any) {
+          logger.error(`[VERIFICATION LINK ERROR] userId=${user.id}: ${linkErr?.message}`);
+          await ctx.editMessageText(`
+❌ *VERIFICATION LINK ERROR*
+
+We couldn't create your verification link right now. Please try again in a moment.`, {
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '🔄 Try Again', callback_data: 'verification' }],
+                [{ text: '⬅️ Back', callback_data: 'account' }]
+              ]
+            }
+          }).catch((err: any) => {
+            if (!err.message?.includes('message is not modified')) throw err;
+          });
         }
       }
     }
+
+    else if (data.startsWith('select_file_')) {
+      const parts = data.split('_');
+      const jobId = parts[2];
+      const fsId = parts[3];
+
+      const job = await db.job.findUnique({ where: { id: jobId } });
+      if (!job) {
+        await ctx.editMessageText(`❌ *Job Not Found*\n\nThis download job could not be found or has expired.`, { parse_mode: 'Markdown' }).catch(() => {});
+        return;
+      }
+
+      if (['QUEUED', 'PROCESSING', 'UPLOADING', 'COMPLETED'].includes(job.status)) {
+        await ctx.answerCbQuery('⚠️ This download job is already being processed or completed.', { show_alert: true }).catch(() => {});
+        return;
+      }
+
+      // Check verification requirements
+      const isVerificationRequiredGlobally = await adminService.getVerificationStatus();
+      const isVerified = (user.plan === 'PREMIUM' || !isVerificationRequiredGlobally) 
+        ? true 
+        : await verificationService.isUserVerified(user.id);
+
+      if (!isVerified) {
+        await jobService.updateJobStatus(job.id, 'VERIFYING');
+        const { getVerificationPromptKeyboard } = require('../keyboards/mainKeyboard');
+        await ctx.editMessageText(
+          `🔒 *Verification Required*\n\nTo get your selected file, please complete verification.`,
+          {
+            parse_mode: 'Markdown',
+            ...getVerificationPromptKeyboard(job.id)
+          }
+        ).catch(() => {});
+        return;
+      }
+
+      // User IS verified: Check daily limits before queueing
+      const usage = await usageService.getUsage(user.id);
+      const dailyLimit = await usageService.getDailyLimit(user.plan);
+      if (usage.dailyRequests >= dailyLimit) {
+        await jobService.cancelJob(job.id);
+        await ctx.editMessageText(`🚫 *Daily limit reached.*\n\nFree users: ${config.FREE_DAILY_LIMIT} downloads/day.\nPremium users: ${config.PREMIUM_DAILY_LIMIT} downloads/day.`, { parse_mode: 'Markdown' }).catch(() => {});
+        return;
+      }
+
+      try {
+        const { jobQueue } = require('../../queue/jobQueue');
+        const waitingCount = await jobQueue.getWaitingCount();
+        const activeCount = await jobQueue.getActiveCount();
+
+        await jobService.updateJobStatus(job.id, 'QUEUED');
+        const priority = user.plan === 'PREMIUM' ? 1 : 5;
+
+        const { getJobKeyboard } = require('../keyboards/jobKeyboard');
+        await ctx.editMessageText(
+          `⏳ *PROCESSING YOUR FILE*\n\n🔗 Source: ${job.provider}\n⚡ Status: Added to queue\n\n📍 Position: #${waitingCount + 1}\n⚡ Active Jobs: ${activeCount}\n\nI'll notify you when your file is ready.`,
+          {
+            parse_mode: 'Markdown',
+            ...getJobKeyboard(job.id)
+          }
+        ).catch(() => {});
+
+        // Queue job into BullMQ for download processing with fsId
+        await jobQueue.add('processDownload', {
+          jobId: job.id,
+          url: job.url,
+          userId: user.id,
+          fsId
+        }, { priority });
+
+      } catch (err: any) {
+        await jobService.failJob(job.id, err.message);
+        await ctx.reply('❌ *An error occurred during queueing.*', { parse_mode: 'Markdown' });
+      }
+    }
+
+    else if (data.startsWith('verify_flow_')) {
+      const jobId = data.replace('verify_flow_', '');
+      
+      // Step 1: Immediately show lightweight loading state
+      await ctx.editMessageText(`⏳ _Creating your verification link via AroLinks..._`, { parse_mode: 'Markdown' }).catch(() => {});
+
+      try {
+        // Step 2: Asynchronously generate link via AroLinks
+        const botUsername = ctx.botInfo?.username;
+        const { shortUrl } = await verificationService.createVerificationFlow(user.id, botUsername);
+        const { getAroLinksVerifyKeyboard } = require('../keyboards/mainKeyboard');
+
+        await ctx.editMessageText(`
+🔒 *VERIFICATION REQUIRED*
+
+Please open the verification link below and complete verification to get your file.
+
+⏱️ *Link expires in 15 minutes.*`, {
+          parse_mode: 'Markdown',
+          ...getAroLinksVerifyKeyboard(shortUrl, jobId)
+        }).catch((err: any) => {
+          if (!err.message?.includes('message is not modified')) throw err;
+        });
+      } catch (err: any) {
+        logger.error(`Error creating verification link for job ${jobId}: ${err?.message}`);
+        await ctx.editMessageText(`❌ *VERIFICATION LINK ERROR*\n\nWe couldn't create your verification link right now. Please try again.`, {
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[{ text: '🔄 Try Again', callback_data: `verify_flow_${jobId}` }]]
+          }
+        }).catch(() => {});
+      }
+    }
+
+    else if (data.startsWith('get_file_')) {
+      const jobId = data.replace('get_file_', '');
+      
+      // Re-check verification status
+      const isVerified = await verificationService.isUserVerified(user.id);
+
+      if (!isVerified) {
+        await ctx.answerCbQuery('🔒 Verification not completed yet. Please complete verification first.', { show_alert: true }).catch(() => {});
+        return;
+      }
+
+      // User IS verified! Retrieve job
+      const job = await db.job.findUnique({ where: { id: jobId } });
+      if (!job) {
+        await ctx.editMessageText(`❌ *Job Not Found*\n\nThis download job could not be found or has expired.`, { parse_mode: 'Markdown' }).catch(() => {});
+        return;
+      }
+
+      if (job.status === 'COMPLETED') {
+        await ctx.answerCbQuery('✅ This file has already been delivered.', { show_alert: true }).catch(() => {});
+        return;
+      }
+
+      // Check Daily limits before queueing
+      const usage = await usageService.getUsage(user.id);
+      const dailyLimit = await usageService.getDailyLimit(user.plan);
+      if (usage.dailyRequests >= dailyLimit) {
+        await ctx.editMessageText(`🚫 *Daily limit reached.*\n\nFree users: ${config.FREE_DAILY_LIMIT} downloads/day.\nPremium users: ${config.PREMIUM_DAILY_LIMIT} downloads/day.`, { parse_mode: 'Markdown' }).catch(() => {});
+        return;
+      }
+
+      try {
+        const { jobQueue } = require('../../queue/jobQueue');
+        const waitingCount = await jobQueue.getWaitingCount();
+        const activeCount = await jobQueue.getActiveCount();
+
+        await jobService.updateJobStatus(job.id, 'QUEUED');
+        const priority = user.plan === 'PREMIUM' ? 1 : 5;
+
+        const { getJobKeyboard } = require('../keyboards/jobKeyboard');
+        await ctx.editMessageText(
+          `⏳ *PROCESSING YOUR LINK*\n\n🔗 Source: ${job.provider}\n⚡ Status: Added to queue\n\n📍 Position: #${waitingCount + 1}\n⚡ Active Jobs: ${activeCount}\n\nI'll notify you when your file is ready.`,
+          {
+            parse_mode: 'Markdown',
+            ...getJobKeyboard(job.id)
+          }
+        ).catch(() => {});
+
+        // Queue job into BullMQ for download processing
+        await jobQueue.add('processDownload', {
+          jobId: job.id,
+          url: job.url,
+          userId: user.id
+        }, { priority });
+
+      } catch (err: any) {
+        await jobService.failJob(job.id, err.message);
+        await ctx.reply('❌ *An error occurred during queueing.*', { parse_mode: 'Markdown' });
+      }
+    }
+
     else if (data === 'premium') {
       const isPremiumEnabled = await adminService.getPremiumStatus();
       if (!isPremiumEnabled) {
         await ctx.editMessageText(`
 ⚠️ *PREMIUM CURRENTLY UNAVAILABLE*
 
-Premium functionality has temporarily been disabled by the administrator.
+Premium functionality is currently disabled by the administrator.
 
 Please try again later.`, {
           parse_mode: 'Markdown',
-          ...getBackKeyboard()
-        }).catch(() => {});
+          ...getBackKeyboard('account')
+        }).catch((err: any) => {
+          if (!err.message?.includes('message is not modified')) throw err;
+        });
         return;
       }
 
+      const usage = await usageService.getUsage(user.id);
+      const dailyLimit = await usageService.getDailyLimit(user.plan);
+      const remaining = Math.max(0, dailyLimit - usage.dailyRequests);
+
       const text = `
-⭐ *Premium*
+⭐ *PREMIUM STATUS*
 
-Premium users receive the configured Premium limits/features.
+Status: ${user.plan === 'PREMIUM' ? '🟢 Enabled' : '🔴 Disabled'}
+📥 Daily Limit: ${dailyLimit} downloads
+📊 Used Today: ${usage.dailyRequests}
+⏳ Remaining: ${remaining} downloads
 
-Free limit: ${config.FREE_DAILY_LIMIT}/day
-Premium limit: ${config.PREMIUM_DAILY_LIMIT}/day
+*Limits:*
+• Free Plan: ${config.FREE_DAILY_LIMIT} downloads/day
+• Premium Plan: ${config.PREMIUM_DAILY_LIMIT} downloads/day
 
-Contact the administrator to upgrade.`;
+Contact administrator to upgrade your account to Premium.`;
       
       await ctx.editMessageText(text, {
         parse_mode: 'Markdown',
-        ...getBackKeyboard()
-      }).catch(() => {});
+        ...getBackKeyboard('account')
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
     }
+
     else if (data === 'help') {
       const text = `
-❓ *How to use*
+❓ *HELP & INSTRUCTIONS*
 
-1. Choose Download
-2. Send a supported link
-3. Wait while your job is processed
-4. Receive the file
+1. Click *📥 Download* or send a supported link directly.
+2. Supported platforms: *TeraBox*, *Diskwala*.
+3. Wait while your job is queued and processed.
+4. Your file will be delivered directly in chat.
 
-• Only one active download per user
-• Daily limits apply
-• Unsupported links will be rejected`;
+*Rules & Limitations:*
+• 1 active download per user at a time
+• Daily download limits apply
+• Verification may be required for Free users
+• Downloaded files are temporary and auto-deleted after delivery`;
       
       await ctx.editMessageText(text, {
         parse_mode: 'Markdown',
-        ...getBackKeyboard()
-      }).catch(() => {});
+        ...getBackKeyboard('main_menu')
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
     }
 
     // ----------------- ADMIN MENUS -----------------
-    else if (!isAdmin) {
-      if (data.startsWith('admin_')) {
-        ctx.answerCbQuery('⛔ ACCESS DENIED: You do not have permission to access the administrator panel.', { show_alert: true }).catch(() => {});
-      }
-      return;
-    }
     else if (data === 'admin_panel') {
       await ctx.editMessageText(`
 👑 *ADMIN PANEL*
 
-Manage the bot, users, verification, Premium,
-shortener, limits and system status.`, {
+Manage your bot settings, users, verification, shortener, and system status from one place.`, {
         parse_mode: 'Markdown',
         ...getAdminKeyboard()
-      }).catch(() => {});
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
     }
+
     else if (data === 'admin_status' || data === 'refresh') {
       let dbStatus = '❌ Error';
       let redisStatus = '❌ Error';
@@ -224,6 +543,7 @@ shortener, limits and system status.`, {
 
       const activeJobs = await db.job.count({ where: { status: { in: ['QUEUED', 'PROCESSING', 'UPLOADING'] } } });
       const queuedJobs = await db.job.count({ where: { status: 'QUEUED' } });
+      const failedJobs = await db.job.count({ where: { status: 'FAILED' } });
       const totalUsers = await db.user.count();
       const usageStats = await db.userUsage.aggregate({ _sum: { dailyRequests: true, successfulRequests: true, failedRequests: true } });
       
@@ -231,97 +551,119 @@ shortener, limits and system status.`, {
       const pEnabled = await adminService.getPremiumStatus();
       const sEnabled = await adminService.getShortenerStatus();
 
+      const { hasTeraBoxCredentials } = require('../../providers/terabox/terabox.resolver');
+      const { hasDiskwalaCredentials } = require('../../providers/diskwala/diskwala.resolver');
+
+      const teraBoxStatus = hasTeraBoxCredentials() ? '🟢 Available' : '🟡 Requires API';
+      const diskwalaStatus = hasDiskwalaCredentials() ? '🟢 Available' : '🟡 Requires API';
+
       const text = `
 📊 *BOT STATUS*
 
 🤖 Bot: Online
 🟢 PostgreSQL: ${dbStatus}
 🟢 Redis: ${redisStatus}
-🟢 Telegram API: Connected
 🟢 Queue: Running
 🟢 Workers: Running
+🟢 Telegram API: Connected
+
 🔐 Verification: ${vEnabled ? 'Enabled' : 'Disabled'}
 ⭐ Premium: ${pEnabled ? 'Enabled' : 'Disabled'}
 🔗 Shortener: ${sEnabled ? 'Active' : 'Inactive'}
-📦 Storage: Connected
 
-*Statistics:*
+🔵 TeraBox: ${teraBoxStatus}
+🟢 Diskwala: ${diskwalaStatus}
+
 👥 Total users: ${totalUsers}
 📥 Downloads today: ${usageStats._sum.dailyRequests || 0}
 ⚡ Active jobs: ${activeJobs}
 ⏳ Queued jobs: ${queuedJobs}
-✅ Completed: ${usageStats._sum.successfulRequests || 0}
-❌ Failed: ${usageStats._sum.failedRequests || 0}`;
+❌ Failed jobs: ${failedJobs}`;
 
       await ctx.editMessageText(text, {
         parse_mode: 'Markdown',
-        reply_markup: { inline_keyboard: [[{ text: '🔄 Refresh Status', callback_data: 'refresh' }], [{ text: '⬅️ Back', callback_data: 'admin_panel' }]] }
-      }).catch(() => {});
+        reply_markup: { inline_keyboard: [[{ text: '🔄 Refresh', callback_data: 'refresh' }], [{ text: '⬅️ Back', callback_data: 'admin_panel' }]] }
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
     }
+
     else if (data === 'admin_verification') {
       const isEnabled = await adminService.getVerificationStatus();
       const text = `
 🔐 *VERIFICATION SETTINGS*
 
-Control whether users must complete verification
-before accessing protected download features.
+Control whether Free users must complete shortener verification before downloading.
 
 Current status:
 ${isEnabled ? '🟢 Enabled' : '🔴 Disabled'}
 
-${isEnabled ? 'Users who are not verified must complete\nverification before downloading.' : 'Users can download without verification.'}`;
+${isEnabled ? 'Users must complete verification before downloading.' : 'Verification is bypassed for all users.'}`;
+
       await ctx.editMessageText(text, {
         parse_mode: 'Markdown',
         ...getAdminVerificationKeyboard(isEnabled)
-      }).catch(() => {});
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
     }
+
     else if (data === 'admin_toggle_verify') {
       const isEnabled = await adminService.getVerificationStatus();
       await adminService.setVerificationStatus(!isEnabled);
+      const newStatus = !isEnabled;
+
       await ctx.editMessageText(`
 ✅ *VERIFICATION UPDATED*
 
-Verification has been successfully ${!isEnabled ? 'enabled' : 'disabled'}.
+Verification is now:
+${newStatus ? '🟢 ENABLED' : '🔴 DISABLED'}
 
-The new setting is now active for users.`, {
+The setting is active immediately.`, {
         parse_mode: 'Markdown',
-        reply_markup: { inline_keyboard: [[{ text: '⬅️ Back', callback_data: 'admin_verification' }]] }
-      }).catch(() => {});
+        ...getAdminVerificationKeyboard(newStatus)
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
     }
+
     else if (data === 'admin_shortener') {
       const isEnabled = await adminService.getShortenerStatus();
       const provider = await adminService.getShortenerProvider();
       const hasKey = !!config.SHORTENER_API_KEY;
-      const vEnabled = await adminService.getVerificationStatus();
       
       const text = `
 🔗 *SHORTENER SETTINGS*
 
 Provider: ${provider}
 Status: ${isEnabled ? '🟢 Active' : '🔴 Inactive'}
-API Key: ${hasKey ? '✅ Configured' : '❌ Missing'}
-Verification: ${vEnabled ? '🟢 Enabled' : '🔴 Disabled'}`;
+API Key: ${hasKey ? '✅ Configured' : '❌ Missing'}`;
 
       await ctx.editMessageText(text, {
         parse_mode: 'Markdown',
         ...getAdminShortenerKeyboard(isEnabled)
-      }).catch(() => {});
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
     }
+
     else if (data === 'admin_toggle_shortener') {
       const isEnabled = await adminService.getShortenerStatus();
       await adminService.setShortenerStatus(!isEnabled);
+      const newStatus = !isEnabled;
       
-      await ctx.editMessageText(!isEnabled ? `
-✅ *SHORTENER ACTIVATED*
+      await ctx.editMessageText(`
+✅ *SHORTENER UPDATED*
 
-Arolinks is now active for the configured verification flow.` : `
-⚠️ *SHORTENER DISABLED*
-
-Arolinks verification is currently disabled.`, {
+Shortener status is now:
+${newStatus ? '🟢 ACTIVE' : '🔴 INACTIVE'}`, {
         parse_mode: 'Markdown',
-        reply_markup: { inline_keyboard: [[{ text: '⬅️ Back', callback_data: 'admin_shortener' }]] }
-      }).catch(() => {});
+        ...getAdminShortenerKeyboard(newStatus)
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
     }
+
     else if (data === 'admin_premium') {
       const isEnabled = await adminService.getPremiumStatus();
       const text = `
@@ -333,62 +675,83 @@ ${isEnabled ? '🟢 Enabled' : '🔴 Disabled'}`;
       await ctx.editMessageText(text, {
         parse_mode: 'Markdown',
         ...getAdminPremiumKeyboard(isEnabled)
-      }).catch(() => {});
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
     }
+
     else if (data === 'admin_toggle_premium') {
       const isEnabled = await adminService.getPremiumStatus();
       await adminService.setPremiumStatus(!isEnabled);
+      const newStatus = !isEnabled;
+
       await ctx.editMessageText(`
 ✅ *PREMIUM UPDATED*
 
-Premium has been successfully ${!isEnabled ? 'enabled' : 'disabled'}.`, {
+Premium is now:
+${newStatus ? '🟢 ENABLED' : '🔴 DISABLED'}`, {
         parse_mode: 'Markdown',
-        reply_markup: { inline_keyboard: [[{ text: '⬅️ Back', callback_data: 'admin_premium' }]] }
-      }).catch(() => {});
+        ...getAdminPremiumKeyboard(newStatus)
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
     }
+
     else if (data === 'admin_users' || data.startsWith('admin_users_')) {
       const page = parseInt(data.split('_')[2] || '1', 10);
       const limit = 5;
-      const skip = (page - 1) * limit;
-      const total = await db.user.count();
-      const totalPages = Math.ceil(total / limit) || 1;
+      const { users, total, totalPages } = await userService.getUsers(page, limit);
 
-      const users = await db.user.findMany({ 
-        skip, 
-        take: limit, 
-        orderBy: { createdAt: 'desc' },
-        include: { usage: true }
-      });
-      
       let userList = '';
-      for (const u of users) {
-        const isVerified = await verificationService.isUserVerified(u.id);
-        const limit = u.plan === 'PREMIUM' ? config.PREMIUM_DAILY_LIMIT : config.FREE_DAILY_LIMIT;
-        
-        userList += `
-👤 User: @${u.username || 'Unknown'}
-🆔 ID: ${u.telegramId}
-⭐ Premium: ${u.plan === 'PREMIUM' ? '🟢' : '🔴'}
-🔐 Verification: ${isVerified ? '✅' : '❌'}
-📥 Today: ${u.usage?.dailyRequests || 0}/${limit}
-🚫 Banned: ${u.isBanned ? '✅' : '❌'}
+      if (users.length === 0) {
+        userList = '\nNo registered users were found.';
+      } else {
+        let index = (page - 1) * limit + 1;
+        for (const u of users) {
+          const isVerified = await verificationService.isUserVerified(u.id);
+          const userLimit = u.plan === 'PREMIUM' ? config.PREMIUM_DAILY_LIMIT : config.FREE_DAILY_LIMIT;
+          const displayName = escapeMarkdown(u.username ? `@${u.username}` : (u.firstName || 'Unknown User'));
+          const regDate = u.createdAt ? new Date(u.createdAt).toLocaleDateString() : 'N/A';
+          const lastAct = u.lastActivity ? new Date(u.lastActivity).toLocaleDateString() : 'N/A';
+
+          userList += `
+${index}. 👤 *${displayName}*
+   🆔 \`${u.telegramId}\`
+   ⭐ *Premium:* ${u.plan === 'PREMIUM' ? 'Enabled 🟢' : 'Disabled 🔴'}
+   🔐 *Verification:* ${isVerified ? 'Verified ✅' : 'Not Verified ❌'}
+   📥 *Today:* ${u.usage?.dailyRequests || 0} / ${userLimit}
+   🚫 *Banned:* ${u.isBanned ? 'Yes 🚫' : 'No'}
+   📅 *Registered:* ${regDate}
+   🕐 *Last Activity:* ${lastAct}
 `;
+          index++;
+        }
       }
 
-      const text = `
-👥 *USER MANAGEMENT*
-${userList || 'No users found.'}`;
+      const text = `👥 *USER MANAGEMENT*
+
+Total users: ${total}
+Showing users page ${page} of ${totalPages}
+${userList}`;
 
       const paginationButtons = [];
       if (page > 1) paginationButtons.push(Markup.button.callback('⬅️ Previous', `admin_users_${page - 1}`));
-      paginationButtons.push(Markup.button.callback(`Page ${page}/${totalPages}`, 'noop'));
+      paginationButtons.push(Markup.button.callback(`${page}/${totalPages}`, 'noop'));
       if (page < totalPages) paginationButtons.push(Markup.button.callback('Next ➡️', `admin_users_${page + 1}`));
+
+      const keyboard = [
+        ...(paginationButtons.length > 0 ? [paginationButtons] : []),
+        [{ text: '⬅️ Back', callback_data: 'admin_panel' }]
+      ];
 
       await ctx.editMessageText(text, {
         parse_mode: 'Markdown',
-        reply_markup: { inline_keyboard: [paginationButtons, [{ text: '⬅️ Back', callback_data: 'admin_panel' }]] }
-      }).catch(() => {});
+        reply_markup: { inline_keyboard: keyboard }
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
     }
+
     else if (data === 'admin_statistics') {
       const totalUsers = await db.user.count();
       const today = new Date();
@@ -403,26 +766,52 @@ ${userList || 'No users found.'}`;
       const queuedJobs = await db.job.count({ where: { status: 'QUEUED' } });
 
       const text = `
-📈 *BOT STATISTICS*
+📈 *STATISTICS*
 
 👥 Total Users: ${totalUsers}
+🆕 New Users Today: ${newUsers}
 
-📅 Today:
+📅 *Today's Activity:*
 • 📥 Downloads: ${usageStats._sum.dailyRequests || 0}
 • ✅ Completed: ${usageStats._sum.successfulRequests || 0}
 • ❌ Failed: ${usageStats._sum.failedRequests || 0}
-• ⚡ Active: ${activeJobs}
+• ⚡ Active Jobs: ${activeJobs}
+• ⏳ Queued Jobs: ${queuedJobs}
 
-📊 Users:
-• ⭐ Premium: ${premiumUsers}
-• 🔐 Verified: ${verifiedUsers}
-• 🚫 Banned: ${bannedUsers}`;
+📊 *Breakdown:*
+• ⭐ Premium Users: ${premiumUsers}
+• 🔐 Verified Users: ${verifiedUsers}
+• 🚫 Banned Users: ${bannedUsers}`;
 
       await ctx.editMessageText(text, {
         parse_mode: 'Markdown',
         reply_markup: { inline_keyboard: [[{ text: '🔄 Refresh', callback_data: 'admin_statistics' }], [{ text: '⬅️ Back', callback_data: 'admin_panel' }]] }
-      }).catch(() => {});
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
     }
+
+    else if (data === 'admin_broadcast') {
+      const text = `
+📢 *BROADCAST MESSAGE*
+
+To send a broadcast message to all users, use the command:
+
+\`/broadcast <your message text>\`
+
+*Example:*
+\`/broadcast Important update: Server maintenance at 12:00 PM.\`
+
+Click *❌ Cancel* below to close this prompt.`;
+
+      await ctx.editMessageText(text, {
+        parse_mode: 'Markdown',
+        ...getAdminBroadcastKeyboard()
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
+    }
+
     else if (data === 'admin_jobs') {
       const pendingJobs = await db.job.findMany({ 
         where: { status: { in: ['PENDING', 'QUEUED', 'PROCESSING', 'UPLOADING'] } },
@@ -435,14 +824,15 @@ ${userList || 'No users found.'}`;
       if (pendingJobs.length === 0) {
         jobList = 'No active jobs.';
       } else {
-        const running = pendingJobs.filter(j => j.status === 'PROCESSING' || j.status === 'UPLOADING');
-        const queued = pendingJobs.filter(j => j.status === 'QUEUED' || j.status === 'PENDING');
+        type JobWithUser = Job & { user: User };
+        const running = pendingJobs.filter((j: JobWithUser) => j.status === 'PROCESSING' || j.status === 'UPLOADING');
+        const queued = pendingJobs.filter((j: JobWithUser) => j.status === 'QUEUED' || j.status === 'PENDING');
 
         if (running.length > 0) {
-          jobList += `*Running:*\n` + running.map(j => `• Job #${j.id.substring(0,6)}\n• User: ${j.user.telegramId}\n• Status: ${j.status}`).join('\n\n') + '\n\n';
+          jobList += `*Running:*\n` + running.map((j: JobWithUser) => `• Job #${j.id.substring(0,6)}\n• User: ${j.user.telegramId}\n• Status: ${j.status}`).join('\n\n') + '\n\n';
         }
         if (queued.length > 0) {
-          jobList += `*Queued:*\n` + queued.map(j => `• Job #${j.id.substring(0,6)}\n• User: ${j.user.telegramId}`).join('\n\n');
+          jobList += `*Queued:*\n` + queued.map((j: JobWithUser) => `• Job #${j.id.substring(0,6)}\n• User: ${j.user.telegramId}`).join('\n\n');
         }
       }
 
@@ -454,8 +844,11 @@ ${jobList}`;
       await ctx.editMessageText(text, {
         parse_mode: 'Markdown',
         ...getAdminJobsKeyboard()
-      }).catch(() => {});
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
     }
+
     else if (data === 'admin_settings') {
       const text = `
 ⚙️ *BOT SETTINGS*
@@ -466,13 +859,16 @@ ${jobList}`;
 • Per-user active-job limit: ${config.MAX_ACTIVE_JOBS_PER_USER}
 • Storage retention: ${config.STORAGE_RETENTION_HOURS}h
 
-*(These settings are currently controlled via the .env file and process variables. Changes require a restart).*`;
+*(Settings are loaded from environment variables in .env)*`;
 
       await ctx.editMessageText(text, {
         parse_mode: 'Markdown',
         reply_markup: { inline_keyboard: [[{ text: '⬅️ Back', callback_data: 'admin_panel' }]] }
-      }).catch(() => {});
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
     }
+
     else if (data === 'admin_storage') {
       const stored = await db.storedFile.count();
       const today = new Date();
@@ -490,11 +886,13 @@ ${jobList}`;
       await ctx.editMessageText(text, {
         parse_mode: 'Markdown',
         ...getAdminStorageKeyboard()
-      }).catch(() => {});
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
     }
 
     else if (data === 'admin_test_shortener') {
-      ctx.answerCbQuery('🧪 Shortener test initiated. Check your messages.', { show_alert: true }).catch(() => {});
+      await ctx.answerCbQuery('🧪 Testing shortener integration...', { show_alert: false }).catch(() => {});
       try {
         const testUrl = 'https://google.com';
         const provider = await getShortenerProvider();
@@ -508,59 +906,111 @@ Arolinks responded successfully.`, { parse_mode: 'Markdown', reply_markup: { inl
 ❌ *SHORTENER TEST FAILED*
 
 The configured Arolinks integration could not be verified.
-Error: ${error.message.substring(0, 50)}...`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '⬅️ Back', callback_data: 'admin_shortener' }]] } });
+Error: ${error.message.substring(0, 80)}`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '⬅️ Back', callback_data: 'admin_shortener' }]] } });
       }
     }
+
     else if (data === 'admin_test_storage') {
       if (!config.STORAGE_CHANNEL_ID) {
-        ctx.answerCbQuery('❌ STORAGE_CHANNEL_ID is not configured in .env', { show_alert: true }).catch(() => {});
+        await ctx.answerCbQuery('❌ STORAGE_CHANNEL_ID is not configured in .env', { show_alert: true }).catch(() => {});
         return;
       }
       try {
         await bot.telegram.sendMessage(config.STORAGE_CHANNEL_ID, '🧪 Storage channel write test successful.');
-        // Mock test
-        await ctx.reply(`✅ *Storage Channel Verified*\nConnected to ID: \`${config.STORAGE_CHANNEL_ID}\``, { parse_mode: 'Markdown' });
+        await ctx.editMessageText(`✅ *STORAGE TEST PASSED*\n\nConnected and verified channel ID: \`${config.STORAGE_CHANNEL_ID}\``, {
+          parse_mode: 'Markdown',
+          reply_markup: { inline_keyboard: [[{ text: '⬅️ Back', callback_data: 'admin_storage' }]] }
+        });
       } catch (e: any) {
-        await ctx.reply(`❌ *Storage Test Failed*\n${e.message}`, { parse_mode: 'Markdown' });
+        await ctx.editMessageText(`❌ *STORAGE TEST FAILED*\n\nError: ${e.message}`, {
+          parse_mode: 'Markdown',
+          reply_markup: { inline_keyboard: [[{ text: '⬅️ Back', callback_data: 'admin_storage' }]] }
+        });
       }
     }
+
     else if (data === 'admin_clean_jobs') {
       const { jobService } = require('../../services/JobService');
       await jobService.cleanStuckJobs();
       await ctx.answerCbQuery('✅ Cleaned up stuck jobs.', { show_alert: true });
+      // Refresh active jobs view
       // @ts-ignore
       ctx.callbackQuery.data = 'admin_jobs';
       return callbackHandler(ctx);
     }
+
     else if (data === 'admin_clean_storage') {
       await db.storedFile.deleteMany({
         where: {
           expiresAt: { lt: new Date() }
         }
       });
-      await ctx.answerCbQuery('🧹 Storage Cache cleanup complete.', { show_alert: true });
+      await ctx.answerCbQuery('🧹 Expired cache cleanup complete.', { show_alert: true });
     }
+
     else if (data === 'admin_cancel_job_prompt') {
-      ctx.answerCbQuery('🛑 To cancel a job, send /cancel <job_id>', { show_alert: true }).catch(() => {});
+      await ctx.answerCbQuery('🛑 Send /cancel <job_id> in chat to cancel a specific job.', { show_alert: true }).catch(() => {});
     }
+
     else if (data === 'admin_retention_storage') {
-      ctx.answerCbQuery(`⏱️ Retention is currently ${config.STORAGE_RETENTION_HOURS} hours. Update .env to change this.`, { show_alert: true }).catch(() => {});
+      await ctx.answerCbQuery(`⏱️ Storage retention is currently ${config.STORAGE_RETENTION_HOURS} hours.`, { show_alert: true }).catch(() => {});
     }
+
     else if (data === 'noop') {
-      // No-op: used for pagination labels that show current page, do nothing
+      // No-op for pagination label buttons
+      await ctx.answerCbQuery().catch(() => {});
     }
-    // ----------------- OTHER ACTIONS -----------------
+
     else if (data.startsWith('cancel_')) {
       const jobId = data.split('_').slice(1).join('_');
       await jobService.cancelJob(jobId);
-      ctx.answerCbQuery('❌ Job cancelled.', { show_alert: true }).catch(() => {});
+      await ctx.answerCbQuery('❌ Download cancelled.', { show_alert: true }).catch(() => {});
+      await ctx.editMessageText(
+        `❌ *DOWNLOAD CANCELLED*\n\nThe download was cancelled before completion.\n\nYour daily download limit was NOT used.`,
+        { parse_mode: 'Markdown' }
+      ).catch(() => {});
     }
+
+    // ----------------- UNKNOWN / OUTDATED CALLBACK -----------------
     else {
-      // Unknown callback — log and silently dismiss
-      console.warn(`[callback] Unhandled callback_data: "${data}"`);
+      console.warn(`[callback] Unknown or outdated callback_data: "${data}"`);
+      await ctx.answerCbQuery('⚠️ Menu outdated.', { show_alert: false }).catch(() => {});
+      await ctx.editMessageText(`
+⚠️ *MENU OUTDATED*
+
+This menu button is no longer valid.
+Please return to the main menu below.`, {
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: [[{ text: '🏠 Main Menu', callback_data: 'main_menu' }]] }
+      }).catch(() => {});
     }
+
   } catch (error: any) {
-    console.error('[callback] Error in callback handler:', error?.message || error);
-    ctx.answerCbQuery('❌ Something went wrong. Please try again.', { show_alert: true }).catch(() => {});
+    console.error('[ADMIN CALLBACK ERROR]', {
+      data,
+      userId: user?.id,
+      telegramId: user?.telegramId?.toString(),
+      message: error?.message || error,
+      stack: error?.stack
+    });
+
+    try {
+      await ctx.answerCbQuery('❌ Action failed. Please try again.', { show_alert: true });
+    } catch {}
+
+    try {
+      await ctx.editMessageText(`
+❌ *ACTION FAILED*
+
+We couldn't complete this action due to a temporary system error.
+Please try again.`, {
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🔄 Retry', callback_data: data }, { text: '⬅️ Back', callback_data: 'admin_panel' }]
+          ]
+        }
+      });
+    } catch {}
   }
 };

@@ -1,40 +1,81 @@
-import { DownloadProvider, ResolvedFile } from '../types';
-import { TeraBoxResolver } from './terabox.resolver';
+import { DownloadProvider, FileInfo, ResolvedFile } from '../types';
+import { TeraBoxResolver, isSafeTeraBoxUrl, hasTeraBoxCredentials, TeraBoxShareMetadata } from './terabox.resolver';
 import { InvalidUrlError } from '../errors';
 
+/**
+ * TeraBoxProvider encapsulates both official TeraBox Open Platform API logic
+ * and isolated fallback resolution.
+ *
+ * If official API credentials (client ID, client secret, access token) are set in .env,
+ * it utilizes official endpoints. Otherwise, it isolates reverse-engineered/unofficial
+ * public link resolution behind this Provider interface so it can be swapped effortlessly.
+ */
 export class TeraBoxProvider implements DownloadProvider {
   public readonly name = 'TeraBox';
 
-  private teraboxDomains = [
-    'terabox.com', 'teraboxapp.com', 'teraboxlink.com', 'nephobox.com',
-    '4funbox.com', 'mirrobox.com', 'momerybox.com', 'terabox.app',
-    'gibox.app', 'freeterabox.com', '1024tera.com', 'terasharelink.com', 'terabox.fun'
-  ];
+  private readonly resolver = new TeraBoxResolver();
 
+  /**
+   * Validate if the given URL is a supported TeraBox public link
+   * and passes domain whitelist & SSRF security checks.
+   */
   canHandle(url: string): boolean {
-    try {
-      const parsedUrl = new URL(url);
-      return this.teraboxDomains.some(domain => parsedUrl.hostname.includes(domain));
-    } catch {
-      return false;
-    }
+    return isSafeTeraBoxUrl(url);
   }
 
-  async resolve(url: string): Promise<ResolvedFile> {
+  /**
+   * Returns whether official TeraBox Open Platform credentials are configured.
+   */
+  isConfigured(): boolean {
+    return hasTeraBoxCredentials();
+  }
+
+  /**
+   * Retrieve basic file metadata without resolving full download payload.
+   */
+  async getFileInfo(url: string): Promise<FileInfo> {
+    const resolved = await this.resolve(url);
+    return {
+      fileName: resolved.fileName,
+      fileSize: resolved.fileSize,
+      mimeType: resolved.mimeType,
+    };
+  }
+
+  /**
+   * Get metadata list for single or multi-file TeraBox share.
+   */
+  async getShareMetadata(url: string): Promise<TeraBoxShareMetadata> {
     if (!this.canHandle(url)) {
-      throw new InvalidUrlError();
+      throw new InvalidUrlError('❌ Invalid TeraBox link');
     }
-    
-    const resolver = new TeraBoxResolver();
-    const result = await resolver.resolvePublicLink(url);
-    
+    return this.resolver.getShareMetadata(url);
+  }
+
+  /**
+   * Resolve selected file from single or multi-file share.
+   */
+  async resolveSelectedFile(url: string, fsId?: string | number): Promise<ResolvedFile> {
+    if (!this.canHandle(url)) {
+      throw new InvalidUrlError('❌ Invalid TeraBox link');
+    }
+
+    const result = await this.resolver.resolveSelectedFile(url, fsId);
+
     return {
       provider: this.name,
       sourceUrl: url,
       fileName: result.fileName,
       fileSize: result.fileSize,
-      mimeType: 'application/octet-stream', // Generic fallback, Terabox doesn't always provide reliable mimetypes
-      downloadUrl: result.downloadUrl
+      mimeType: result.mimeType,
+      downloadUrl: result.downloadUrl,
     };
+  }
+
+  /**
+   * Complete resolution process returning file details and direct download URL.
+   */
+  async resolve(url: string): Promise<ResolvedFile> {
+    return this.resolveSelectedFile(url);
   }
 }

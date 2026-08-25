@@ -1,5 +1,5 @@
 export class ProviderError extends Error {
-  constructor(message: string, public readonly code?: string) {
+  constructor(message: string, public readonly code?: string, public readonly providerName?: string) {
     super(message);
     this.name = 'ProviderError';
   }
@@ -23,5 +23,20 @@ export class InvalidUrlError extends ProviderError {
   constructor(message = 'Invalid or unsupported public link.') {
     super(message, 'INVALID_URL');
     this.name = 'InvalidUrlError';
+  }
+}
+
+/**
+ * Thrown when a provider is correctly detected but cannot proceed
+ * because official API credentials are not configured.
+ * This is NOT an error — it is an expected state when credentials are absent.
+ */
+export class ProviderAccessError extends ProviderError {
+  constructor(public readonly providerName: string, message?: string) {
+    super(
+      message || `${providerName} requires official API credentials that are not configured.`,
+      'ACCESS_REQUIRED'
+    );
+    this.name = 'ProviderAccessError';
   }
 }

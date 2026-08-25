@@ -1,25 +1,36 @@
 import { db } from '../db';
-import { VerificationSession, User } from '@prisma/client';
+import type { VerificationSession, User, Prisma } from '@prisma/client';
 import { tokenService } from './token.service';
 import { getShortenerProvider } from './shortener.service';
 import { config } from '../config';
+import { logger } from '../utils/logger';
+
+export interface VerificationFlowResult {
+  success: boolean;
+  shortUrl: string;
+  token: string;
+  duration: number;
+}
 
 export class VerificationService {
   /**
-   * Generates a new verification session for a user and returns the short URL.
+   * Generates a new verification session for a user with a 15-minute token validity
+   * and returns the actual AroLinks short URL targeting the Telegram bot deep link.
+   * Completely removes dependency on VERIFICATION_BASE_URL.
    */
-  async createVerificationFlow(userId: number): Promise<{ shortUrl: string; duration: number }> {
-    const rawToken = tokenService.generateSecureToken();
+  async createVerificationFlow(userId: number, botUsername?: string): Promise<VerificationFlowResult> {
+    const targetBotUsername = botUsername || process.env.BOT_USERNAME || 'NexTeraDownloadBot';
+
+    const rawToken = tokenService.generateSecureToken(32);
     const tokenHash = tokenService.hashToken(rawToken);
     
-    // Default 24 hours validity for the link itself to be clicked
-    const linkExpiry = new Date();
-    linkExpiry.setHours(linkExpiry.getHours() + 24);
+    // Strict 15 minutes token validity for verification link completion
+    const linkExpiry = new Date(Date.now() + 15 * 60 * 1000);
 
     const provider = await getShortenerProvider();
     const providerName = provider.getProviderName();
 
-    // Create session in DB
+    // Create session in DB with 15-min expiration
     const session = await db.verificationSession.create({
       data: {
         userId,
@@ -30,36 +41,48 @@ export class VerificationService {
       }
     });
 
-    // Generate destination callback URL
-    const destinationUrl = `${config.VERIFICATION_BASE_URL}/verify/${rawToken}`;
+    // Destination callback URL: Telegram bot deep link
+    // When user completes AroLinks, AroLinks redirects to https://t.me/<BotUsername>?start=verify_<token>
+    const destinationUrl = `https://t.me/${targetBotUsername}?start=verify_${rawToken}`;
     
-    // Get short URL
+    // Fetch real shortened URL returned by AroLinks API
     const shortUrl = await provider.createShortUrl(destinationUrl);
     
-    // Update reference
+    if (!shortUrl || typeof shortUrl !== 'string' || !shortUrl.startsWith('http')) {
+      throw new Error('AroLinks API returned an invalid or missing short URL.');
+    }
+
+    // Store short URL reference in DB
     await db.verificationSession.update({
       where: { id: session.id },
       data: { shortenerReference: shortUrl }
     });
 
-    return { shortUrl, duration: config.VERIFICATION_VALIDITY_MINUTES };
+    return {
+      success: true,
+      shortUrl,
+      token: rawToken,
+      duration: 15
+    };
   }
 
   /**
-   * Validates a token sent from the web callback.
+   * Validates an internal token sent from Telegram deep link (/start verify_<token>)
+   * or web callback (/verify/:token).
+   * Enforces 15-minute expiration, single-use, and prevents token reuse.
    */
   async validateToken(rawToken: string): Promise<{ success: boolean; message: string; user?: User }> {
     const tokenHash = tokenService.hashToken(rawToken);
 
     // Run within a transaction to prevent race conditions on verification
-    return await db.$transaction(async (tx) => {
+    return await db.$transaction(async (tx: Prisma.TransactionClient) => {
       const session = await tx.verificationSession.findUnique({
         where: { tokenHash },
         include: { user: true }
       });
 
       if (!session) {
-        return { success: false, message: 'Invalid verification token.' };
+        return { success: false, message: 'Invalid or unrecognized verification token.' };
       }
 
       if (session.status === 'VERIFIED' || session.status === 'USED') {
@@ -71,14 +94,14 @@ export class VerificationService {
           where: { id: session.id },
           data: { status: 'EXPIRED' }
         });
-        return { success: false, message: 'This verification link has expired.' };
+        return { success: false, message: 'This verification link has expired (15-minute limit exceeded).' };
       }
 
       if (session.status !== 'PENDING') {
-        return { success: false, message: 'Invalid session state.' };
+        return { success: false, message: 'Invalid verification session state.' };
       }
 
-      // Mark session as VERIFIED
+      // Mark session as USED to prevent token reuse
       await tx.verificationSession.update({
         where: { id: session.id },
         data: {
@@ -87,9 +110,9 @@ export class VerificationService {
         }
       });
 
-      // Update user verification validity
-      const userExpiry = new Date();
-      userExpiry.setMinutes(userExpiry.getMinutes() + config.VERIFICATION_VALIDITY_MINUTES);
+      // Update user verification validity (15 minutes or configured validity)
+      const userExpiryMinutes = config.VERIFICATION_VALIDITY_MINUTES || 15;
+      const userExpiry = new Date(Date.now() + userExpiryMinutes * 60 * 1000);
 
       const user = await tx.user.update({
         where: { id: session.userId },
@@ -97,12 +120,17 @@ export class VerificationService {
       });
 
       const { redis } = require('../redis');
-      await redis.setex(`user:${session.userId}:verified`, config.VERIFICATION_VALIDITY_MINUTES * 60, 'true');
+      await redis.setex(`user:${session.userId}:verified`, userExpiryMinutes * 60, 'true');
+
+      logger.info(`[VerificationService] User ${session.userId} successfully verified via token.`);
 
       return { success: true, message: 'Verification successful.', user };
     });
   }
 
+  /**
+   * Checks whether the user has an active verified session.
+   */
   async isUserVerified(userId: number): Promise<boolean> {
     const { redis } = require('../redis');
     const cached = await redis.get(`user:${userId}:verified`);

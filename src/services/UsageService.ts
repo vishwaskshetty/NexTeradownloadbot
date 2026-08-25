@@ -1,5 +1,5 @@
 import { db } from '../db';
-import { UserUsage } from '@prisma/client';
+import type { UserUsage } from '@prisma/client';
 import { config } from '../config';
 
 export class UsageService {
@@ -11,7 +11,7 @@ export class UsageService {
     
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    const lastReset = usage.lastResetDate;
+    const lastReset = new Date(usage.lastResetDate);
     lastReset.setHours(0, 0, 0, 0);
 
     if (lastReset < today) {
@@ -29,14 +29,16 @@ export class UsageService {
     return usage;
   }
 
-  async recordRequest(userId: number, success: boolean): Promise<void> {
+  /**
+   * Records a failed download attempt.
+   * NOTE: Does NOT increment dailyRequests or dailyLimit quota.
+   */
+  async recordFailedRequest(userId: number): Promise<void> {
     const usage = await this.getUsage(userId);
     await db.userUsage.update({
       where: { userId },
       data: {
-        dailyRequests: usage.dailyRequests + 1,
-        successfulRequests: success ? usage.successfulRequests + 1 : usage.successfulRequests,
-        failedRequests: !success ? usage.failedRequests + 1 : usage.failedRequests
+        failedRequests: usage.failedRequests + 1
       }
     });
   }

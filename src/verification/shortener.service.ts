@@ -11,8 +11,7 @@ export class BitlyProvider implements ShortenerProvider {
 
   async createShortUrl(destinationUrl: string): Promise<string> {
     if (!config.SHORTENER_API_KEY) {
-      logger.warn('No SHORTENER_API_KEY provided for BitlyProvider. Returning original URL.');
-      return destinationUrl;
+      throw new Error('SHORTENER_API_KEY is not configured for Bitly.');
     }
     
     try {
@@ -23,13 +22,17 @@ export class BitlyProvider implements ShortenerProvider {
           headers: {
             'Authorization': `Bearer ${config.SHORTENER_API_KEY}`,
             'Content-Type': 'application/json'
-          }
+          },
+          timeout: 10000
         }
       );
-      return response.data.link;
+      if (response.data?.link) {
+        return response.data.link;
+      }
+      throw new Error('Bitly API returned no link');
     } catch (error: any) {
-      logger.error(error, 'Failed to create short url via Bitly');
-      throw new Error('Shortener API failed');
+      logger.error(`[BitlyProvider] Bitly API error: ${error?.message}`);
+      throw error;
     }
   }
 }
@@ -40,7 +43,7 @@ export class DisabledProvider implements ShortenerProvider {
   }
 
   async createShortUrl(destinationUrl: string): Promise<string> {
-    return destinationUrl; // Just pass through the long URL gracefully
+    return destinationUrl;
   }
 }
 
@@ -50,14 +53,33 @@ export class ArolinksProvider implements ShortenerProvider {
   }
 
   async createShortUrl(destinationUrl: string): Promise<string> {
-    if (!config.SHORTENER_API_KEY) {
-      throw new Error('SHORTENER_API_KEY is not configured for Arolinks.');
+    if (!config.SHORTENER_API_KEY || config.SHORTENER_API_KEY.includes('your_arolinks_api_key')) {
+      throw new Error('SHORTENER_API_KEY is not configured in .env for AroLinks.');
     }
-    
-    // Per the strict requirement: "If the exact Arolinks API integration cannot be verified, 
-    // clearly mark it as requiring official API documentation instead of creating fake functionality."
-    // Since there are no API docs provided in the workspace for Arolinks, we strictly throw this error.
-    throw new Error('AROLINKS_API_UNVERIFIED: The exact Arolinks API endpoints and response formats are not documented in the project. Please provide the official API documentation to complete this integration.');
+
+    try {
+      // AroLinks API endpoint: GET https://arolinks.com/api?api=KEY&url=DESTINATION
+      const apiUrl = `https://arolinks.com/api?api=${encodeURIComponent(config.SHORTENER_API_KEY)}&url=${encodeURIComponent(destinationUrl)}`;
+      const response = await axios.get(apiUrl, { timeout: 10000 });
+      const data = response.data;
+      
+      const shortUrl = data?.shortenedUrl || data?.shortened_url || data?.url || data?.short_url || data?.link;
+      if (shortUrl && typeof shortUrl === 'string' && shortUrl.startsWith('http')) {
+        logger.info(`[ArolinksProvider] Successfully generated AroLinks URL: ${shortUrl}`);
+        return shortUrl;
+      }
+
+      if (data?.status === 'error' && Array.isArray(data?.message)) {
+        throw new Error(`AroLinks API returned error: ${data.message.join(', ')}`);
+      }
+
+      throw new Error(`AroLinks API response format unrecognized`);
+    } catch (err: any) {
+      // Sanitize secrets in error logging
+      const sanitizedErrMsg = (err?.message || '').replace(config.SHORTENER_API_KEY, '***');
+      logger.error(`[ArolinksProvider] AroLinks request failed: ${sanitizedErrMsg}`);
+      throw new Error(`AroLinks API request failed: ${sanitizedErrMsg}`);
+    }
   }
 }
 
@@ -72,10 +94,8 @@ export const getShortenerProvider = async (): Promise<ShortenerProvider> => {
   
   if (providerName === 'bitly') {
     return new BitlyProvider();
-  } else if (providerName === 'arolinks') {
-    return new ArolinksProvider();
   }
   
-  // Default fallback if unknown provider
-  return new BitlyProvider();
+  // Default to AroLinks as requested
+  return new ArolinksProvider();
 };

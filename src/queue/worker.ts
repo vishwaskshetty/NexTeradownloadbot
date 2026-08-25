@@ -2,8 +2,9 @@ import { Worker, Job } from 'bullmq';
 import { redis } from '../redis';
 import { db } from '../db';
 import { jobService } from '../services/JobService';
+import { usageService } from '../services/UsageService';
 import { providerRegistry } from '../providers';
-import { ProviderError } from '../providers/errors';
+import { ProviderError, ProviderAccessError } from '../providers/errors';
 import { logger } from '../utils/logger';
 import { bot } from '../bot';
 import { config } from '../config';
@@ -14,6 +15,15 @@ import path from 'path';
 import crypto from 'crypto';
 
 let downloadWorker: Worker | null = null;
+
+function formatBytes(bytes: number | bigint): string {
+  const num = Number(bytes);
+  if (!num || num === 0) return 'Unknown size';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(num) / Math.log(k));
+  return parseFloat((num / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
 
 const downloadFile = async (url: string, destPath: string): Promise<void> => {
   const writer = fs.createWriteStream(destPath);
@@ -54,12 +64,25 @@ export const initWorker = () => {
   if (downloadWorker) return;
   
   const processJob = async (job: Job) => {
-    const { jobId, url, userId } = job.data;
-    const telegramId = (await jobService.getJobWithUser(jobId))?.user?.telegramId?.toString();
+    const { jobId, url, userId, fsId } = job.data;
+    const jobRecord = await jobService.getJobWithUser(jobId);
+    const user = jobRecord?.user;
+    const telegramId = user?.telegramId?.toString();
     
     let tempFilePath: string | null = null;
 
     try {
+      if (!user) {
+        throw new Error(`User associated with job ${jobId} not found.`);
+      }
+
+      // Re-verify daily limit before proceeding to download
+      const currentUsage = await usageService.getUsage(user.id);
+      const dailyLimit = await usageService.getDailyLimit(user.plan);
+      if (currentUsage.dailyRequests >= dailyLimit) {
+        throw new ProviderError(`🚫 Daily limit reached (${dailyLimit} downloads/day). Limit was reached while waiting in queue.`);
+      }
+
       // QUEUED -> PROCESSING
       await jobService.updateJobStatus(jobId, 'PROCESSING');
       
@@ -76,7 +99,8 @@ export const initWorker = () => {
       }
 
       // Check PostgreSQL StoredFile Cache
-      const urlHash = crypto.createHash('sha256').update(url).digest('hex');
+      const cacheKeyStr = fsId ? `${url}#fs_${fsId}` : url;
+      const urlHash = crypto.createHash('sha256').update(cacheKeyStr).digest('hex');
       const cachedFile = await db.storedFile.findUnique({ where: { urlHash } });
 
       if (cachedFile && cachedFile.expiresAt > new Date()) {
@@ -85,28 +109,53 @@ export const initWorker = () => {
           try { await bot.telegram.sendMessage(telegramId, `⚡ _File found in cache. Sending instantly..._`, { parse_mode: 'Markdown' }); } catch(e){}
         }
 
+        // PROCESSING -> FILE_READY -> SENDING
+        await jobService.updateJobStatus(jobId, 'FILE_READY');
+        await jobService.updateJobStatus(jobId, 'SENDING');
+
+        // Deliver cached file to user
         await withRetry(async () => {
           await bot.telegram.sendDocument(telegramId!, cachedFile.telegramFileId, {
             caption: `✅ Download completed!\n🔗 Provider: ${adapter.name}\n⚡ Fast Cached Delivery`
           });
         }, 3);
 
-        await jobService.completeJob(jobId);
+        // ATOMIC & IDEMPOTENT COMPLETION: Increments usage ONLY ONCE upon successful delivery
+        await jobService.completeJob(jobId, cachedFile.fileSize || 0n);
+        const updatedUsage = await usageService.getUsage(user.id);
+        const remaining = Math.max(0, dailyLimit - updatedUsage.dailyRequests);
+
+        const successMsg =
+          `✅ *DOWNLOAD COMPLETE*\n\n` +
+          `📁 File: \`${cachedFile.fileName}\`\n` +
+          `📦 Size: ${formatBytes(cachedFile.fileSize || 0n)}\n\n` +
+          `Your download has been successfully completed.\n\n` +
+          `📊 Daily usage: ${updatedUsage.dailyRequests}/${dailyLimit}\n` +
+          `📥 Remaining: ${remaining}`;
+
+        if (telegramId) {
+          try { await bot.telegram.sendMessage(telegramId, successMsg, { parse_mode: 'Markdown' }); } catch(e){}
+        }
         return; // Job is fully done
       }
 
-      // Resolve the direct link
-      const resolvedFile = await adapter.resolve(url);
+      // Resolve the direct link for single or selected multi-file item
+      const adapterInstance = adapter as any;
+      const resolvedFile = typeof adapterInstance.resolveSelectedFile === 'function'
+        ? await adapterInstance.resolveSelectedFile(url, fsId)
+        : await adapter.resolve(url);
       
       // Notify about download
       if (telegramId) {
-        try { await bot.telegram.sendMessage(telegramId, `📄 *File found*\n📦 Size: ${resolvedFile.fileSize} bytes\n⬇️ _Downloading..._`, { parse_mode: 'Markdown' }); } catch(e){}
+        try { await bot.telegram.sendMessage(telegramId, `📄 *File found*\n📦 Size: ${formatBytes(resolvedFile.fileSize)}\n⬇️ _Downloading..._`, { parse_mode: 'Markdown' }); } catch(e){}
       }
 
       // Download file to temp
       tempFilePath = path.join(os.tmpdir(), `nextera_${jobId}_${Date.now()}`);
-      
       await withRetry(() => downloadFile(resolvedFile.downloadUrl, tempFilePath!), 3);
+
+      // Status: PROCESSING -> FILE_READY
+      await jobService.updateJobStatus(jobId, 'FILE_READY');
 
       // Notify about upload
       if (telegramId) {
@@ -115,6 +164,9 @@ export const initWorker = () => {
 
       const filename = resolvedFile.fileName || 'downloaded_file';
       let sentToUser: any = null;
+
+      // Status: FILE_READY -> SENDING
+      await jobService.updateJobStatus(jobId, 'SENDING');
 
       // Upload file to telegram (Storage channel cache or direct to user)
       if (config.STORAGE_CHANNEL_ID) {
@@ -175,25 +227,50 @@ export const initWorker = () => {
         }, 3);
       }
 
-      await jobService.completeJob(jobId);
+      // ATOMIC & IDEMPOTENT COMPLETION: Increments usage ONLY ONCE upon successful delivery
+      await jobService.completeJob(jobId, BigInt(resolvedFile.fileSize || 0));
+
+      const updatedUsage = await usageService.getUsage(user.id);
+      const remaining = Math.max(0, dailyLimit - updatedUsage.dailyRequests);
+
+      const successMsg =
+        `✅ *DOWNLOAD COMPLETE*\n\n` +
+        `📁 File: \`${filename}\`\n` +
+        `📦 Size: ${formatBytes(resolvedFile.fileSize)}\n\n` +
+        `Your download has been successfully completed.\n\n` +
+        `📊 Daily usage: ${updatedUsage.dailyRequests}/${dailyLimit}\n` +
+        `📥 Remaining: ${remaining}`;
+
+      if (telegramId) {
+        try { await bot.telegram.sendMessage(telegramId, successMsg, { parse_mode: 'Markdown' }); } catch(e){}
+      }
 
     } catch (error: any) {
-      let userMsg = '❌ Unable to access this public file.\nPlease check that the link is valid and publicly accessible.';
-      
-      if (error instanceof ProviderError) {
-        userMsg = `❌ ${error.message}`;
-      } else if (error.message.includes('timeout') || error.message.includes('network')) {
-         userMsg = '❌ Provider or network temporarily unavailable.';
+      let userMsg =
+        `❌ *DOWNLOAD FAILED*\n\n` +
+        `The file could not be delivered.\n\n` +
+        `Your daily download limit was NOT used.\n\n` +
+        `You can try again with another valid link.`;
+
+      if (error instanceof ProviderAccessError) {
+        userMsg =
+          `⚠️ *${error.providerName.toUpperCase()} ACCESS UNAVAILABLE*\n\n` +
+          `This ${error.providerName} link requires an available official ${error.providerName} integration.\n\n` +
+          `Your daily download limit was NOT used.`;
       }
       
+      // Fail job without incrementing daily usage limit
       await jobService.failJob(jobId, error.message || 'Unknown error');
-      logger.error(`Job ${jobId} failed:`, error.message);
+      if (user) {
+        await usageService.recordFailedRequest(user.id);
+      }
+      logger.error(`Job ${jobId} failed: ${error.message}`);
       
       if (telegramId) {
-        try { await bot.telegram.sendMessage(telegramId, userMsg); } catch(e){}
+        try { await bot.telegram.sendMessage(telegramId, userMsg, { parse_mode: 'Markdown' }); } catch(e){}
       }
     } finally {
-      // Clean up temporary file
+      // Temporary file cleanup ALWAYS happens
       if (tempFilePath && fs.existsSync(tempFilePath)) {
         try {
           fs.unlinkSync(tempFilePath);

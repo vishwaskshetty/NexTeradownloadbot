@@ -1,5 +1,5 @@
 import { db } from '../db';
-import { User } from '@prisma/client';
+import type { User } from '@prisma/client';
 import { logger } from '../utils/logger';
 
 export class UserService {
@@ -49,6 +49,21 @@ export class UserService {
       where: { telegramId: BigInt(telegramId) },
       data: { isBanned: false }
     });
+  }
+
+  async getUsers(page: number = 1, limit: number = 5) {
+    const skip = Math.max(0, (page - 1) * limit);
+    const total = await db.user.count();
+    const totalPages = Math.ceil(total / limit) || 1;
+
+    const users = await db.user.findMany({
+      skip,
+      take: limit,
+      orderBy: { createdAt: 'desc' },
+      include: { usage: true }
+    });
+
+    return { users, total, totalPages, page };
   }
 }
 

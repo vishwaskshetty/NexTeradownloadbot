@@ -1,4 +1,5 @@
 import { Context } from 'telegraf';
+import type { User } from '@prisma/client';
 import { adminService } from '../../services/AdminService';
 import { userService } from '../../services/UserService';
 import { jobService } from '../../services/JobService';
@@ -46,7 +47,7 @@ export const adminCommand = async (ctx: Context) => {
 
     case 'users':
       const recentUsers = await db.user.findMany({ take: 10, orderBy: { createdAt: 'desc' } });
-      const userList = recentUsers.map(u => `${u.id} - ${u.username || u.firstName} [${u.plan}]`).join('\n');
+      const userList = recentUsers.map((u: User) => `${u.id} - ${u.username || u.firstName} [${u.plan}]`).join('\n');
       return ctx.reply(`Recent Users:\n${userList}`);
 
     case 'ban':

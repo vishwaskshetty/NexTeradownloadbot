@@ -7,10 +7,10 @@ const envSchema = z.object({
     : z.string().url('DATABASE_URL must be a valid connection string in .env'),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   LOG_LEVEL: z.string().default('info'),
-  SHORTENER_PROVIDER: z.string().default('mock'),
+  SHORTENER_PROVIDER: z.string().default('arolinks'),
   SHORTENER_API_KEY: z.string().optional(),
-  VERIFICATION_BASE_URL: z.string().url().default('http://localhost:3000'),
-  VERIFICATION_VALIDITY_MINUTES: z.coerce.number().default(1440),
+  VERIFICATION_BASE_URL: z.string().optional(),
+  VERIFICATION_VALIDITY_MINUTES: z.coerce.number().default(15),
   ADMIN_TELEGRAM_IDS: z.string().transform((val) => val.split(',').filter(Boolean).map(Number)).default(''),
   FREE_DAILY_LIMIT: z.coerce.number().default(5),
   PREMIUM_DAILY_LIMIT: z.coerce.number().default(50),
@@ -24,6 +24,13 @@ const envSchema = z.object({
   JOB_TIMEOUT_MS: z.coerce.number().default(1800000), // 30m default
   STORAGE_CHANNEL_ID: z.string().optional(),
   STORAGE_RETENTION_HOURS: z.coerce.number().default(24),
+  // TeraBox Official API credentials (optional)
+  TERABOX_CLIENT_ID: z.string().optional(),
+  TERABOX_CLIENT_SECRET: z.string().optional(),
+  TERABOX_ACCESS_TOKEN: z.string().optional(),
+  TERABOX_REFRESH_TOKEN: z.string().optional(),
+  // Diskwala Official API credentials (optional)
+  DISKWALA_API_KEY: z.string().optional(),
 });
 
 const _env = envSchema.safeParse(process.env);

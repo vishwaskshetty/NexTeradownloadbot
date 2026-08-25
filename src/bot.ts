@@ -41,9 +41,31 @@ bot.command('premium', adminCommand);
 bot.command('addpremium', adminCommand);
 bot.command('removepremium', adminCommand);
 bot.command('activejobs', adminCommand);
+bot.command('cancel', async (ctx) => {
+  const text = ctx.message?.text || '';
+  const args = text.split(' ').slice(1);
+  if (!args[0]) {
+    return ctx.reply('Usage: /cancel <job_id>');
+  }
+  const { jobService } = require('./services/JobService');
+  await jobService.cancelJob(args[0]);
+  return ctx.reply(`❌ Job #${args[0].substring(0, 6)} has been cancelled.`);
+});
+
+bot.command('admin', async (ctx) => {
+  const user = ctx.state?.user;
+  if (!user || !require('./services/AdminService').adminService.isAdmin(user.telegramId)) {
+    return ctx.reply('❌ ACCESS DENIED: Administrator permissions required.');
+  }
+  return require('./bot/handlers/callback').callbackHandler({
+    ...ctx,
+    callbackQuery: { data: 'admin_panel' },
+    answerCbQuery: async () => true,
+    editMessageText: async (text: string, extra: any) => ctx.reply(text, extra)
+  } as any);
+});
+
 bot.command('account', (ctx) => {
-  // Simulate clicking the account button
-  ctx.state.simulateAccount = true;
   return require('./bot/handlers/callback').callbackHandler({
     ...ctx,
     callbackQuery: { data: 'account' },
@@ -52,11 +74,20 @@ bot.command('account', (ctx) => {
   } as any);
 });
 
+bot.command('help', (ctx) => {
+  return require('./bot/handlers/callback').callbackHandler({
+    ...ctx,
+    callbackQuery: { data: 'help' },
+    answerCbQuery: async () => true,
+    editMessageText: async (text: string, extra: any) => ctx.reply(text, extra)
+  } as any);
+});
+
 // Actions/Callbacks
-bot.on('callback_query', callbackHandler);
+bot.on('callback_query', (ctx) => callbackHandler(ctx));
 
 // Messages
-bot.on('text', messageHandler);
+bot.on('text', (ctx) => messageHandler(ctx));
 
 // Start the bot gracefully
 let isBotRunning = false;
