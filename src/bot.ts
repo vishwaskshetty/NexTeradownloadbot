@@ -42,6 +42,9 @@ bot.command('addpremium', adminCommand);
 bot.command('extendpremium', adminCommand);
 bot.command('removepremium', adminCommand);
 bot.command('viewpremium', adminCommand);
+bot.command('addchannel', adminCommand);
+bot.command('removechannel', adminCommand);
+bot.command('setforcesubmsg', adminCommand);
 bot.command('activejobs', adminCommand);
 bot.command('cancel', async (ctx) => {
   const text = ctx.message?.text || '';

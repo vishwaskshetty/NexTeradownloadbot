@@ -22,7 +22,8 @@ import {
   getAdminPremiumKeyboard,
   getAdminStorageKeyboard,
   getAdminJobsKeyboard,
-  getAdminBroadcastKeyboard
+  getAdminBroadcastKeyboard,
+  getAdminForceSubKeyboard
 } from '../keyboards/adminKeyboard';
 import { getMainMenuText } from '../commands/start';
 import { config } from '../../config';
@@ -623,6 +624,21 @@ Contact administrator to upgrade your account to Premium.`;
       });
     }
 
+    else if (data === 'check_force_sub') {
+      const { forceSubService } = require('../../services/ForceSubService');
+      const checkResult = await forceSubService.checkUserMembership(ctx.telegram, user.telegramId);
+
+      if (checkResult.isMember) {
+        await ctx.answerCbQuery('✅ Membership verified! You can now use the bot.', { show_alert: true });
+        await ctx.editMessageText(getMainMenuText(), {
+          parse_mode: 'Markdown',
+          ...getMainKeyboard(isAdmin, false)
+        }).catch(() => {});
+      } else {
+        await ctx.answerCbQuery('❌ You have not joined all required channels yet. Please join all channels and try again.', { show_alert: true });
+      }
+    }
+
     // ----------------- ADMIN MENUS -----------------
     else if (data === 'admin_panel') {
       await ctx.editMessageText(`
@@ -634,6 +650,84 @@ Manage your bot settings, users, verification, shortener, and system status from
       }).catch((err: any) => {
         if (!err.message?.includes('message is not modified')) throw err;
       });
+    }
+
+    else if (data === 'admin_forcesub') {
+      const { forceSubService } = require('../../services/ForceSubService');
+      const isEnabled = await forceSubService.getForceSubStatus();
+      const channels = await forceSubService.getRequiredChannels();
+
+      let text = `📢 *FORCE SUBSCRIBE MANAGEMENT*\n\nStatus: ${isEnabled ? '🟢 Enabled' : '🔴 Disabled'}\nRequired Channels: ${channels.length}\n\n`;
+
+      if (channels.length === 0) {
+        text += `_No required channels configured yet._\n\nUse command below to add a channel:\n\`/addchannel <id_or_username> <name> <invite_url>\``;
+      } else {
+        text += `*Configured Channels:*\n`;
+        channels.forEach((c: any, idx: number) => {
+          text += `${idx + 1}. *${c.name}* (\`${c.id}\`)\n   URL: ${c.inviteUrl}\n`;
+        });
+      }
+
+      await ctx.editMessageText(text, {
+        parse_mode: 'Markdown',
+        ...getAdminForceSubKeyboard(isEnabled)
+      }).catch((err: any) => {
+        if (!err.message?.includes('message is not modified')) throw err;
+      });
+    }
+
+    else if (data === 'admin_toggle_forcesub') {
+      const { forceSubService } = require('../../services/ForceSubService');
+      const isEnabled = await forceSubService.getForceSubStatus();
+      await forceSubService.setForceSubStatus(!isEnabled);
+      await ctx.answerCbQuery(`Force Sub set to ${!isEnabled ? 'ENABLED' : 'DISABLED'}`, { show_alert: true });
+      
+      const channels = await forceSubService.getRequiredChannels();
+      let text = `📢 *FORCE SUBSCRIBE MANAGEMENT*\n\nStatus: ${!isEnabled ? '🟢 Enabled' : '🔴 Disabled'}\nRequired Channels: ${channels.length}\n\n`;
+      if (channels.length === 0) {
+        text += `_No required channels configured yet._\n\nUse command below to add a channel:\n\`/addchannel <id_or_username> <name> <invite_url>\``;
+      } else {
+        text += `*Configured Channels:*\n`;
+        channels.forEach((c: any, idx: number) => {
+          text += `${idx + 1}. *${c.name}* (\`${c.id}\`)\n   URL: ${c.inviteUrl}\n`;
+        });
+      }
+
+      await ctx.editMessageText(text, {
+        parse_mode: 'Markdown',
+        ...getAdminForceSubKeyboard(!isEnabled)
+      }).catch(() => {});
+    }
+
+    else if (data === 'admin_add_channel_prompt') {
+      await ctx.reply(
+        `➕ *ADD REQUIRED CHANNEL*\n\nTo add a channel, send this command:\n\n\`/addchannel <channel_id_or_username> <channel_name> <invite_url>\` \n\nExample:\n\`/addchannel -100123456789 "Main Channel" https://t.me/examplechannel\``,
+        { parse_mode: 'Markdown' }
+      );
+    }
+
+    else if (data === 'admin_remove_channel_prompt') {
+      await ctx.reply(
+        `➖ *REMOVE REQUIRED CHANNEL*\n\nTo remove a channel, send this command:\n\n\`/removechannel <channel_id_or_username>\` \n\nExample:\n\`/removechannel -100123456789\``,
+        { parse_mode: 'Markdown' }
+      );
+    }
+
+    else if (data === 'admin_list_channels') {
+      const { forceSubService } = require('../../services/ForceSubService');
+      const channels = await forceSubService.getRequiredChannels();
+      let text = `📋 *REQUIRED CHANNELS LIST*\n\nTotal: ${channels.length}\n\n`;
+      channels.forEach((c: any, idx: number) => {
+        text += `${idx + 1}. *${c.name}*\n   ID: \`${c.id}\`\n   URL: ${c.inviteUrl}\n\n`;
+      });
+      await ctx.reply(text || 'No channels configured.', { parse_mode: 'Markdown' });
+    }
+
+    else if (data === 'admin_edit_forcesub_msg_prompt') {
+      await ctx.reply(
+        `✏️ *EDIT FORCE SUB MESSAGE*\n\nTo update the force sub message, send this command:\n\n\`/setforcesubmsg <custom_message_text>\` \n\nSupports placeholder: \`{user_name}\``,
+        { parse_mode: 'Markdown' }
+      );
     }
 
     else if (data === 'admin_status' || data === 'refresh') {

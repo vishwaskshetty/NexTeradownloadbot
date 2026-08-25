@@ -1,5 +1,5 @@
-import { Context } from 'telegraf';
-import { getMainKeyboard, getDisclaimerText } from '../keyboards/mainKeyboard';
+import { Context, Markup } from 'telegraf';
+import { getMainKeyboard } from '../keyboards/mainKeyboard';
 import { userService } from '../../services/UserService';
 import { adminService } from '../../services/AdminService';
 import { verificationService } from '../../verification/verification.service';
@@ -34,6 +34,37 @@ export const startCommand = async (ctx: Context) => {
     );
 
     const isAdmin = adminService.isAdmin(telegramId);
+
+    // ADMIN BYPASS: Force Subscribe check ONLY applies to normal users
+    if (!isAdmin) {
+      const { forceSubService } = require('../../services/ForceSubService');
+      const isForceSubEnabled = await forceSubService.getForceSubStatus();
+      if (isForceSubEnabled) {
+        const checkResult = await forceSubService.checkUserMembership(ctx.telegram, telegramId);
+        if (!checkResult.isMember) {
+          const rawMsg = await forceSubService.getCustomMessage();
+          const userName = ctx.from?.first_name || 'User';
+          const formattedMsg = rawMsg.replace(/\{user_name\}/g, userName);
+
+          const inlineKeyboard: any[] = [];
+          checkResult.missingChannels.forEach((ch: any, idx: number) => {
+            inlineKeyboard.push([
+              Markup.button.url(`📢 Join ${ch.name || `Channel ${idx + 1}`}`, ch.inviteUrl)
+            ]);
+          });
+          inlineKeyboard.push([
+            Markup.button.callback('🔄 Check Again', 'check_force_sub')
+          ]);
+
+          await ctx.reply(formattedMsg, {
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: inlineKeyboard }
+          });
+          return;
+        }
+      }
+    }
+
     const isVerificationRequired = await adminService.getVerificationStatus();
     const showVerification = isVerificationRequired && user.plan === 'FREE';
 

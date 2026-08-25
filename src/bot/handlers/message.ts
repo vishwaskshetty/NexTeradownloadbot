@@ -29,6 +29,46 @@ export const messageHandler = async (ctx: Context) => {
 
     if (!text || !user) return;
 
+    const isAdmin = adminService.isAdmin(user.telegramId);
+
+    // ADMIN BYPASS: Admins have ZERO restrictions!
+    if (!isAdmin) {
+      // 1. Force Subscribe Check for Normal Users
+      const { forceSubService } = require('../../services/ForceSubService');
+      const isForceSubEnabled = await forceSubService.getForceSubStatus();
+      if (isForceSubEnabled) {
+        const checkResult = await forceSubService.checkUserMembership(ctx.telegram, user.telegramId);
+        if (!checkResult.isMember) {
+          const rawMsg = await forceSubService.getCustomMessage();
+          const userName = ctx.from?.first_name || 'User';
+          const formattedMsg = rawMsg.replace(/\{user_name\}/g, userName);
+
+          const inlineKeyboard: any[] = [];
+          checkResult.missingChannels.forEach((ch: any, idx: number) => {
+            inlineKeyboard.push([
+              Markup.button.url(`📢 Join ${ch.name || `Channel ${idx + 1}`}`, ch.inviteUrl)
+            ]);
+          });
+          inlineKeyboard.push([
+            Markup.button.callback('🔄 Check Again', 'check_force_sub')
+          ]);
+
+          await ctx.reply(formattedMsg, {
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: inlineKeyboard }
+          });
+          return;
+        }
+      }
+
+      // 2. Active Job Check (1 active job limit for normal users)
+      const activeJob = await jobService.getActiveJob(user.id);
+      if (activeJob) {
+        await ctx.reply('⏳ *You already have a download in progress. Please wait until it is completed.*', { parse_mode: 'Markdown' });
+        return;
+      }
+    }
+
     // 1. Detect provider (fast sync operation)
     const adapterInfo = detectAdapter(text);
     if (!adapterInfo) {
@@ -39,18 +79,11 @@ export const messageHandler = async (ctx: Context) => {
 
     const adapter = adapterInfo.adapter;
 
-    // 2. Check Active Job Limit (1 active job per user)
-    const activeJob = await jobService.getActiveJob(user.id);
-    if (activeJob) {
-      await ctx.reply('⏳ *You already have a download in progress. Please wait until it is completed.*', { parse_mode: 'Markdown' });
-      return;
-    }
-
-    // 3. Create Pending Job
+    // Create Pending Job
     const result = await jobService.createJob(user.id, text, adapterInfo.providerName);
     const job = result.job;
 
-    // 4. Check for Multi-File Share
+    // Check for Multi-File Share
     const adapterInstance = adapter as any;
     let shareMetadata: any = null;
     if (typeof adapterInstance.getShareMetadata === 'function') {
@@ -91,9 +124,9 @@ export const messageHandler = async (ctx: Context) => {
       return; // Wait for user to select a file
     }
 
-    // 5. Single File Flow: Check Verification Status
+    // Check Verification Status (Admins BYPASS completely)
     const isVerificationRequiredGlobally = await adminService.getVerificationStatus();
-    const isVerified = (user.plan === 'PREMIUM' || !isVerificationRequiredGlobally) 
+    const isVerified = (isAdmin || user.plan === 'PREMIUM' || !isVerificationRequiredGlobally) 
       ? true 
       : await verificationService.isUserVerified(user.id);
 
@@ -107,19 +140,21 @@ export const messageHandler = async (ctx: Context) => {
           ...getVerificationPromptKeyboard(job.id)
         }
       );
-      return; // Do NOT count usage, do NOT queue job
-    }
-
-    // IF VERIFIED: Check Daily limits before queueing
-    const usage = await usageService.getUsage(user.id);
-    const dailyLimit = await usageService.getDailyLimit(user.plan);
-    if (usage.dailyRequests >= dailyLimit) {
-      await jobService.cancelJob(job.id);
-      await ctx.reply(`🚫 *Daily limit reached.*\n\nFree users: ${config.FREE_DAILY_LIMIT} downloads/day.\nPremium users: ${config.PREMIUM_DAILY_LIMIT} downloads/day.`, { parse_mode: 'Markdown' });
       return;
     }
 
-    // 6. Queue Job for processing
+    // Check Daily limits before queueing (Admins BYPASS completely)
+    if (!isAdmin) {
+      const usage = await usageService.getUsage(user.id);
+      const dailyLimit = await usageService.getDailyLimit(user.plan);
+      if (usage.dailyRequests >= dailyLimit) {
+        await jobService.cancelJob(job.id);
+        await ctx.reply(`🚫 *Daily limit reached.*\n\nFree users: ${config.FREE_DAILY_LIMIT} downloads/day.\nPremium users: ${config.PREMIUM_DAILY_LIMIT} downloads/day.`, { parse_mode: 'Markdown' });
+        return;
+      }
+    }
+
+    // Queue Job for processing
     try {
       const { jobQueue } = require('../../queue/jobQueue');
       
@@ -131,7 +166,7 @@ export const messageHandler = async (ctx: Context) => {
       }
 
       await jobService.updateJobStatus(job.id, 'QUEUED');
-      const priority = user.plan === 'PREMIUM' ? 1 : 5;
+      const priority = (isAdmin || user.plan === 'PREMIUM') ? 1 : 5;
       
       const activeCount = await jobQueue.getActiveCount();
       const statusMsg = await ctx.reply(

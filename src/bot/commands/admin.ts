@@ -64,6 +64,43 @@ export const adminCommand = async (ctx: Context) => {
       return ctx.reply(`✅ Unbanned user ${args[0]}`);
     }
 
+    case 'addchannel': {
+      if (args.length < 3) {
+        return ctx.reply('Usage: /addchannel <channel_id_or_username> <channel_name> <invite_url>\n\nExample:\n/addchannel -100123456789 "Main Channel" https://t.me/examplechannel');
+      }
+      const chId = args[0];
+      const chName = args[1];
+      const chUrl = args[2];
+
+      const { forceSubService } = require('../../services/ForceSubService');
+      await forceSubService.addChannel({
+        id: chId,
+        username: chId.startsWith('@') ? chId.replace('@', '') : undefined,
+        name: chName,
+        inviteUrl: chUrl
+      });
+      return ctx.reply(`✅ Added force sub channel: *${chName}* (\`${chId}\`)`, { parse_mode: 'Markdown' });
+    }
+
+    case 'removechannel': {
+      if (!args[0]) return ctx.reply('Usage: /removechannel <channel_id_or_username>');
+      const { forceSubService } = require('../../services/ForceSubService');
+      const removed = await forceSubService.removeChannel(args[0]);
+      if (removed) {
+        return ctx.reply(`✅ Removed force sub channel \`${args[0]}\``, { parse_mode: 'Markdown' });
+      } else {
+        return ctx.reply(`❌ Channel \`${args[0]}\` was not found.`, { parse_mode: 'Markdown' });
+      }
+    }
+
+    case 'setforcesubmsg': {
+      if (args.length === 0) return ctx.reply('Usage: /setforcesubmsg <custom_message_text>');
+      const msgText = args.join(' ');
+      const { forceSubService } = require('../../services/ForceSubService');
+      await forceSubService.setCustomMessage(msgText);
+      return ctx.reply(`✅ Force sub message updated:\n\n${msgText}`, { parse_mode: 'Markdown' });
+    }
+
     case 'addpremium': {
       if (!args[0]) return ctx.reply('Usage: /addpremium <telegramId> [days]');
       const targetId = parseInt(args[0], 10);
