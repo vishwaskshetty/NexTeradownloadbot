@@ -8,8 +8,20 @@ export interface ValidationResult {
   reason?: string;
 }
 
-// ── Size tolerance constants ───────────────────────────────────────────────────
-const SIZE_TOLERANCE_LOWER = 0.90; // actual must be >= 90% of expected
+export interface ValidationOptions {
+  /** Lower bound size ratio vs expected size (e.g. 0.90 for 90%, 0.99 for 99%). Default: 0.90 */
+  toleranceLower?: number;
+  /** Upper bound size ratio vs expected size (e.g. 1.10 for 110%, 1.01 for 101%). Default: 1.10 */
+  toleranceUpper?: number;
+  /** Byte threshold above which files < 1 MB are auto-rejected as suspicious error pages. Default: 1 MB */
+  suspiciousThreshold?: number;
+  /** Absolute minimum size for non-text files in bytes. Default: 1024 (1 KB) */
+  smallFileAbsoluteMin?: number;
+}
+
+// ── Size tolerance default constants ───────────────────────────────────────────
+const DEFAULT_SIZE_TOLERANCE_LOWER = 0.90; // actual must be >= 90% of expected
+const DEFAULT_SIZE_TOLERANCE_UPPER = 1.10; // actual must be <= 110% of expected
 const SMALL_FILE_ABSOLUTE_MIN = 1024; // 1 KB absolute floor for media/archive files
 const SUSPICIOUS_THRESHOLD = 1024 * 1024; // If expected > 1 MB, actual < 1 MB is auto-reject
 
@@ -51,7 +63,7 @@ export function formatBytes(bytes: number | bigint): string {
  *  - Actual size = 0
  *  - Actual size < 1 KB for non-text files
  *  - Expected > 1 MB but actual < 1 MB  (suspicious small — error page)
- *  - Actual < 90% of expected size
+ *  - Actual < toleranceLower * expected size (default 90%)
  *  - First bytes match HTML/JSON/XML error signatures
  *  - Magic-byte mismatch for known formats (files > 1 MB)
  */
@@ -59,7 +71,13 @@ export async function validateDownloadedFile(
   filePath: string,
   expectedSize?: number,
   filename?: string,
+  options?: ValidationOptions,
 ): Promise<ValidationResult> {
+
+  const toleranceLower = options?.toleranceLower ?? DEFAULT_SIZE_TOLERANCE_LOWER;
+  const toleranceUpper = options?.toleranceUpper ?? DEFAULT_SIZE_TOLERANCE_UPPER;
+  const suspiciousThreshold = options?.suspiciousThreshold ?? SUSPICIOUS_THRESHOLD;
+  const smallFileMin = options?.smallFileAbsoluteMin ?? SMALL_FILE_ABSOLUTE_MIN;
 
   // Guard 1: File must exist
   if (!fs.existsSync(filePath)) {
@@ -83,29 +101,30 @@ export async function validateDownloadedFile(
   }
 
   // Guard 3: Absolute minimum for non-text files
-  if (!isTextFile && actualSize < SMALL_FILE_ABSOLUTE_MIN) {
+  if (!isTextFile && actualSize < smallFileMin) {
     return {
       valid: false, actualSize,
-      reason: `File too small: ${actualSize} B. Minimum for media/archive is ${SMALL_FILE_ABSOLUTE_MIN} B.`,
+      reason: `File too small: ${actualSize} B. Minimum for media/archive is ${smallFileMin} B.`,
     };
   }
 
   // Guard 4: Size vs expectedSize
   if (expectedSize && expectedSize > 0) {
-    if (expectedSize > SUSPICIOUS_THRESHOLD && actualSize < SUSPICIOUS_THRESHOLD) {
+    if (expectedSize > suspiciousThreshold && actualSize < suspiciousThreshold) {
       return {
         valid: false, actualSize,
         reason: `Suspiciously small: expected ${formatBytes(expectedSize)} but got ${formatBytes(actualSize)}. Likely an error page, not the real file.`,
       };
     }
-    if (actualSize < expectedSize * SIZE_TOLERANCE_LOWER) {
+    if (actualSize < expectedSize * toleranceLower) {
       const pct = Math.round((actualSize / expectedSize) * 100);
+      const requiredPct = Math.round(toleranceLower * 100);
       return {
         valid: false, actualSize,
-        reason: `Size mismatch: expected ${formatBytes(expectedSize)}, downloaded ${formatBytes(actualSize)} (${pct}% — below 90% threshold).`,
+        reason: `Size mismatch: expected ${formatBytes(expectedSize)}, downloaded ${formatBytes(actualSize)} (${pct}% — below ${requiredPct}% threshold).`,
       };
     }
-    if (actualSize > expectedSize * 1.10) {
+    if (actualSize > expectedSize * toleranceUpper) {
       logger.warn(`[Validation] File larger than expected: ${formatBytes(actualSize)} vs ${formatBytes(expectedSize)}. Proceeding.`);
     }
   }

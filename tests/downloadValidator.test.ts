@@ -284,3 +284,81 @@ describe('formatBytes', () => {
   it('formats 349 MB', () => expect(formatBytes(366_002_036)).toMatch(/MB/));
   it('formats BigInt', () => expect(formatBytes(BigInt(1024))).toBe('1 KB'));
 });
+
+// ── Configurable Size Tolerance Options ───────────────────────────────────────
+
+describe('validateDownloadedFile — configurable tolerance', () => {
+  let filePath: string;
+  const EXPECTED = 100 * MB;
+
+  afterAll(() => cleanup(filePath));
+
+  it('supports custom 0.99 tolerance (strict 99% check)', async () => {
+    const size = Math.floor(EXPECTED * 0.98); // 98%
+    filePath = makeTempFile('size_98pct.bin', size);
+    // With default (0.90), 98% passes
+    const defaultRes = await validateDownloadedFile(filePath, EXPECTED, 'data.bin');
+    expect(defaultRes.valid).toBe(true);
+
+    // With custom strict tolerance (0.99), 98% fails
+    const strictRes = await validateDownloadedFile(filePath, EXPECTED, 'data.bin', { toleranceLower: 0.99 });
+    expect(strictRes.valid).toBe(false);
+    expect(strictRes.reason).toMatch(/mismatch|below 99%/i);
+  });
+});
+
+// ── TC5: Expired URL Cache Busting logic ──────────────────────────────────────
+
+describe('TC5: Expired URL cache invalidation logic', () => {
+  it('extracts share code correctly to enable cache busting', () => {
+    const { extractShareCode } = require('../src/providers/terabox/terabox.resolver');
+    const url1 = 'https://terabox.com/s/1abcd1234efg';
+    const url2 = 'https://www.1024terabox.com/s/xyz987654';
+    const url3 = 'https://teraboxapp.com/sharing/link?surl=1qwerty123';
+
+    expect(extractShareCode(url1)).toBe('abcd1234efg');
+    expect(extractShareCode(url2)).toBe('xyz987654');
+    expect(extractShareCode(url3)).toBe('qwerty123');
+  });
+});
+
+// ── TC6: Cache Validation & Invalidation logic ────────────────────────────────
+
+describe('TC6: Cache Validation Rule', () => {
+  it('rejects cached file if cachedFileSize differs significantly from requested expectedSize', () => {
+    const requestedExpectedSize = 366_002_036; // 349 MB
+    const corruptCachedSize = 117; // 117 bytes from a previous corrupt upload
+
+    // Replicate cache validation rule from src/queue/worker.ts:
+    const isCacheValid = (cachedSize: number, expected: number): boolean => {
+      if (cachedSize < 1024) return false;
+      if (expected > 0) {
+        if (cachedSize < expected * 0.90 || cachedSize > expected * 1.10) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    expect(isCacheValid(corruptCachedSize, requestedExpectedSize)).toBe(false);
+    expect(isCacheValid(366_000_000, requestedExpectedSize)).toBe(true);
+    expect(isCacheValid(1024 * 1024, requestedExpectedSize)).toBe(false); // 1 MB cached vs 349 MB expected -> rejected
+  });
+});
+
+// ── TC7: Telegram Polling Isolation ──────────────────────────────────────────
+
+describe('TC7: Telegram Polling Isolation', () => {
+  it('verifies that importing worker modules does not invoke bot.launch()', () => {
+    // Check that src/worker.ts exports or runs standalone workers without bot.launch
+    const workerFile = fs.readFileSync(path.join(__dirname, '../src/worker.ts'), 'utf8');
+    expect(workerFile).not.toContain('bot.launch');
+    expect(workerFile).not.toContain('getUpdates');
+  });
+
+  it('verifies bot.ts guards polling with isPollingLaunched and ENABLE_TELEGRAM_POLLING', () => {
+    const botFile = fs.readFileSync(path.join(__dirname, '../src/bot.ts'), 'utf8');
+    expect(botFile).toContain('isPollingLaunched');
+    expect(botFile).toContain('ENABLE_TELEGRAM_POLLING');
+  });
+});

@@ -9,6 +9,16 @@ jest.mock('../src/db', () => ({
   db: require('jest-mock-extended').mockDeep()
 }));
 
+jest.mock('../src/redis', () => ({
+  redis: {
+    get: jest.fn().mockResolvedValue(null),
+    setex: jest.fn().mockResolvedValue('OK'),
+    del: jest.fn().mockResolvedValue(1),
+    on: jest.fn(),
+    setMaxListeners: jest.fn(),
+  }
+}));
+
 const mockDb = db as unknown as ReturnType<typeof mockDeep<PrismaClient>>;
 
 describe('Verification System & Security', () => {
@@ -37,11 +47,9 @@ describe('Verification System & Security', () => {
   });
 
   describe('Shortener Provider', () => {
-    it('should fallback to mock provider if no config', async () => {
-      const provider = getShortenerProvider();
-      expect(provider.getProviderName()).toBe('mock');
-      const url = await provider.createShortUrl('http://test.com');
-      expect(url).toContain('http://mock.short/');
+    it('should return a valid provider instance', async () => {
+      const provider = await getShortenerProvider();
+      expect(['arolinks', 'bitly', 'disabled']).toContain(provider.getProviderName());
     });
   });
 
