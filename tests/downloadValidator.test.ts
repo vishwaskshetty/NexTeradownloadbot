@@ -881,10 +881,12 @@ describe('TEST 22: resolveWithPahadi10Flow Implementation & Error Handling', () 
 describe('TEST 23: NDUS Diagnostics & Health Check', () => {
   const {
     inspectNdusConfiguration,
+    normalizeNdus,
+    mergeCookies,
     testTeraBoxAuthentication,
   } = require('../src/providers/terabox/terabox.resolver');
 
-  it('TC1: Inspects raw token, ndus prefix, and cookie prefix formats safely', () => {
+  it('TC1: Inspects raw token, ndus cookie, and cookie header formats safely', () => {
     expect(inspectNdusConfiguration('ABC123XYZ')).toEqual({
       configured: true,
       length: 9,
@@ -893,12 +895,12 @@ describe('TEST 23: NDUS Diagnostics & Health Check', () => {
     expect(inspectNdusConfiguration('ndus=ABC123XYZ')).toEqual({
       configured: true,
       length: 9,
-      format: 'ndus-prefix',
+      format: 'ndus-cookie',
     });
     expect(inspectNdusConfiguration('Cookie: ndus=ABC123XYZ; TSID=123')).toEqual({
       configured: true,
       length: 9,
-      format: 'cookie-prefix',
+      format: 'cookie-header',
     });
     expect(inspectNdusConfiguration('')).toEqual({
       configured: false,
@@ -912,7 +914,20 @@ describe('TEST 23: NDUS Diagnostics & Health Check', () => {
     });
   });
 
-  it('TC2: testTeraBoxAuthentication returns NOT_CONFIGURED when NDUS is absent', async () => {
+  it('TC2: Normalizes quoted and prefixed NDUS tokens cleanly', () => {
+    expect(normalizeNdus('"ABC123XYZ"')).toBe('ABC123XYZ');
+    expect(normalizeNdus('ndus="ABC123XYZ"')).toBe('ABC123XYZ');
+    expect(normalizeNdus('Cookie: ndus="ABC123XYZ"; csrfToken=foo')).toBe('ABC123XYZ');
+  });
+
+  it('TC3: Merges cookies without duplicate keys or syntax errors', () => {
+    const merged = mergeCookies('ndus=ABC123XYZ', ['csrfToken=token123; path=/', 'PANWEB=1; domain=.terabox.app']);
+    expect(merged).toContain('ndus=ABC123XYZ');
+    expect(merged).toContain('csrfToken=token123');
+    expect(merged).toContain('PANWEB=1');
+  });
+
+  it('TC4: testTeraBoxAuthentication returns expected union status', async () => {
     const status = await testTeraBoxAuthentication();
     expect(['NOT_CONFIGURED', 'REJECTED', 'HEALTHY', 'PROVIDER_ERROR']).toContain(status);
   });

@@ -21,24 +21,38 @@ import {
 import { logger } from '../../utils/logger';
 
 /**
- * Normalizes raw TERABOX_NDUS value so that both `xyz` and `ndus=xyz` or `Cookie: ndus=xyz`
- * are correctly formatted as the clean token value.
+ * Normalizes raw TERABOX_NDUS value so that `xyz`, `ndus=xyz`, `Cookie: ndus=xyz`,
+ * quoted values `"ndus=xyz"`, and formatted headers are cleanly parsed to the raw token.
  */
 export function normalizeNdus(rawNdus?: string): string | null {
   if (!rawNdus) return null;
-  const trimmed = rawNdus.trim();
+  let trimmed = rawNdus.trim();
   if (!trimmed) return null;
-  const match = trimmed.match(/(?:^|;\s*|\b)ndus=([^;\s]+)/i);
-  if (match) {
-    return match[1].trim();
+
+  // Strip wrapping outer quotes
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    trimmed = trimmed.slice(1, -1).trim();
   }
-  return trimmed;
+
+  // Strip leading 'Cookie:' header prefix
+  trimmed = trimmed.replace(/^Cookie:\s*/i, '').trim();
+
+  // Match ndus=<value> pattern
+  const match = trimmed.match(/(?:^|;\s*|\b)ndus\s*=\s*([^;]+)/i);
+  let val = match ? match[1].trim() : trimmed;
+
+  // Strip quotes around matched token if present
+  if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+    val = val.slice(1, -1).trim();
+  }
+
+  return val.length > 0 ? val : null;
 }
 
 export interface NdusDiagnostic {
   configured: boolean;
   length: number;
-  format: 'raw-token' | 'ndus-prefix' | 'cookie-prefix' | 'empty';
+  format: 'raw-token' | 'ndus-cookie' | 'cookie-header' | 'invalid' | 'empty';
 }
 
 /**
@@ -51,16 +65,54 @@ export function inspectNdusConfiguration(rawNdus?: string): NdusDiagnostic {
   const trimmed = rawNdus.trim();
   let format: NdusDiagnostic['format'] = 'raw-token';
   if (/^Cookie:\s*ndus=/i.test(trimmed)) {
-    format = 'cookie-prefix';
+    format = 'cookie-header';
   } else if (/^ndus=/i.test(trimmed)) {
-    format = 'ndus-prefix';
+    format = 'ndus-cookie';
   }
   const normalized = normalizeNdus(trimmed);
+  if (!normalized) {
+    format = 'invalid';
+  }
   return {
     configured: Boolean(normalized && normalized.length > 0),
     length: normalized ? normalized.length : 0,
     format,
   };
+}
+
+/**
+ * Merges existing cookie header with newly received Set-Cookie headers into a single cookie string.
+ */
+export function mergeCookies(existingCookies?: string, setCookieHeader?: string[] | string): string {
+  const cookieMap = new Map<string, string>();
+
+  if (existingCookies) {
+    existingCookies.split(';').forEach(c => {
+      const idx = c.indexOf('=');
+      if (idx > 0) {
+        const k = c.substring(0, idx).trim();
+        const v = c.substring(idx + 1).trim();
+        if (k && v) cookieMap.set(k, v);
+      }
+    });
+  }
+
+  if (setCookieHeader) {
+    const rawList = Array.isArray(setCookieHeader) ? setCookieHeader : [setCookieHeader];
+    rawList.forEach(c => {
+      const firstPart = c.split(';')[0];
+      const idx = firstPart.indexOf('=');
+      if (idx > 0) {
+        const k = firstPart.substring(0, idx).trim();
+        const v = firstPart.substring(idx + 1).trim();
+        if (k && v) cookieMap.set(k, v);
+      }
+    });
+  }
+
+  return Array.from(cookieMap.entries())
+    .map(([k, v]) => `${k}=${v}`)
+    .join('; ');
 }
 
 const isNdusAvailable = Boolean(normalizeNdus(config.TERABOX_NDUS));
@@ -478,7 +530,8 @@ export class TeraBoxResolver {
     let sign: string | undefined;
     let timestamp: number | string | undefined;
     let jsToken: string | undefined;
-    let sessionCookies: string | undefined;
+    const normalizedNdusVal = normalizeNdus(config.TERABOX_NDUS);
+    let sessionCookies: string | undefined = normalizedNdusVal ? `ndus=${normalizedNdusVal}` : undefined;
 
     logger.info(`[TeraBox] Stage 2: Creating share session`);
     // Scrape share page to extract active jsToken and session cookies
@@ -487,6 +540,7 @@ export class TeraBoxResolver {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          ...(sessionCookies ? { Cookie: sessionCookies } : {}),
         },
         timeout: 10000,
       });
@@ -494,9 +548,9 @@ export class TeraBoxResolver {
       const html = String(pageRes.data || '');
       const jsTokenMatch = html.match(/fn%28%22([0-9A-Fa-f]+)%22%29/) || decodeURIComponent(html).match(/fn\("([0-9A-Fa-f]+)"\)/);
       jsToken = jsTokenMatch ? jsTokenMatch[1] : undefined;
-      sessionCookies = pageRes.headers['set-cookie']
-        ? pageRes.headers['set-cookie'].map((c: string) => c.split(';')[0]).join('; ')
-        : undefined;
+      if (pageRes.headers['set-cookie']) {
+        sessionCookies = mergeCookies(sessionCookies, pageRes.headers['set-cookie']);
+      }
       logger.info(`[TeraBox] Stage 3: Extracting jsToken -> ${jsToken ? 'YES' : 'NO'}`);
     } catch (e: any) {
       logger.warn(`[TeraBox] Stage 2/3 session creation warning: ${e.message}`);
@@ -857,18 +911,24 @@ export class TeraBoxResolver {
 
     const downloadEndpoint = `${this.UNOFFICIAL_API_BASE}/share/download?app_id=250528`;
 
-    logger.info(`[TeraBox Auth] NDUS header attached: ${normalizedNdusVal ? 'YES' : 'NO'}`);
+    const combinedCookies = mergeCookies(
+      activeCookies,
+      normalizedNdusVal ? `ndus=${normalizedNdusVal}` : undefined
+    );
+    const cookieNames = combinedCookies
+      .split(';')
+      .map(c => c.trim().split('=')[0])
+      .filter(Boolean);
+
+    logger.info(`[TeraBox Auth] NDUS attached: ${normalizedNdusVal ? 'YES' : 'NO'}`);
+    logger.info(`[TeraBox Auth] Cookie names: [${cookieNames.join(', ')}]`);
+    logger.info(`[TeraBox Auth] NDUS header format: ndus=<masked> (length=${normalizedNdusVal ? normalizedNdusVal.length : 0})`);
     logger.info(`[TeraBox Auth] jsToken attached: ${activeJsToken ? 'YES' : 'NO'}`);
     logger.info(`[TeraBox Auth] sign attached: ${shareContext.sign ? 'YES' : 'NO'}`);
     logger.info(`[TeraBox Auth] timestamp attached: ${shareContext.timestamp ? 'YES' : 'NO'}`);
     logger.info(`[TeraBox Auth] fs_id attached: YES`);
     logger.info(`[TeraBox Auth] endpoint: ${new URL(downloadEndpoint).hostname}${new URL(downloadEndpoint).pathname}`);
     logger.info(`[TeraBox Auth] method: POST`);
-
-    const combinedCookies = [
-      activeCookies,
-      normalizedNdusVal ? `ndus=${normalizedNdusVal}` : '',
-    ].filter(Boolean).join('; ');
 
     const downloadRes = await this.safeFetch(downloadEndpoint, {
       method: 'POST',
