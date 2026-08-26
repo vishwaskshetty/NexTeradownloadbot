@@ -34,6 +34,15 @@ if (isRediss || config.REDIS_TLS || isUpstash) {
   };
 }
 
+export let redisHost = 'unknown';
+try {
+  const parsed = new URL(config.REDIS_URL);
+  redisHost = parsed.hostname;
+} catch {
+  const match = config.REDIS_URL.match(/@([^:/]+)/);
+  if (match) redisHost = match[1];
+}
+
 export const redis = new Redis(config.REDIS_URL, options);
 
 // Prevent max listeners warning since bullmq might attach listeners
@@ -53,6 +62,9 @@ redis.on('error', (err: any) => {
 let hasConnected = false;
 redis.on('connect', () => {
   if (!hasConnected) {
+    logger.info(`[Redis Health] Provider: ${redisHost}`);
+    logger.info(`[Redis Health] Connection: SUCCESS`);
+    logger.info(`[Redis Health] BullMQ Redis: READY`);
     logger.info('Redis connected successfully');
     hasConnected = true;
   } else if (retryCounter > 0) {
@@ -60,3 +72,4 @@ redis.on('connect', () => {
     retryCounter = 0;
   }
 });
+

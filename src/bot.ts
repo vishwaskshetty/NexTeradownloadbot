@@ -185,22 +185,26 @@ export const start = async () => {
 
     // 2. Connect/check Redis
     if (config.NODE_ENV !== 'test') {
-      const { redis } = require('./redis');
+      const { redis, redisHost } = require('./redis');
       const maskedRedisUrl = (config.REDIS_URL || '').replace(/:([^:@]+)@/, ':***@');
       logger.info('Checking Redis...');
+      logger.info(`[Redis Health] Provider: ${redisHost}`);
       logger.info(`[Redis] Connecting to: ${maskedRedisUrl}`);
       
       let redisConnected = false;
       let lastRedisError: any = null;
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          await Promise.race([
+          const pong = await Promise.race([
             redis.ping(),
             new Promise((_, reject) =>
               setTimeout(() => reject(new Error('Redis ping timeout')), 10000)
             ),
           ]);
           redisConnected = true;
+          logger.info(`[Redis Health] Connection: SUCCESS`);
+          logger.info(`[Redis Health] Ping: ${pong}`);
+          logger.info(`[Redis Health] BullMQ Redis: READY`);
           logger.info('Redis connected successfully\n');
           break;
         } catch (err: any) {
