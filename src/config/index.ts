@@ -54,13 +54,29 @@ const isProcessEnvNdus = typeof process.env.TERABOX_NDUS === 'string' && process
 const isConfigNdus = typeof config.TERABOX_NDUS === 'string' && config.TERABOX_NDUS.trim().length > 0;
 const ndusLen = isConfigNdus ? config.TERABOX_NDUS!.trim().length : 0;
 
+let credentialFormat = 'EMPTY';
+if (isConfigNdus) {
+  const trimmed = config.TERABOX_NDUS!.trim();
+  if (/^Cookie:\s*ndus=/i.test(trimmed)) {
+    credentialFormat = 'COOKIE_PREFIX';
+  } else if (/^ndus=/i.test(trimmed)) {
+    credentialFormat = 'NDUS_PREFIX';
+  } else {
+    credentialFormat = 'RAW';
+  }
+}
+
 if (process.env.NODE_ENV !== 'test') {
   console.log(`[Config] TERABOX_NDUS loaded: ${isConfigNdus ? 'YES' : 'NO'}`);
-  console.log(`[TeraBox Auth] process.env TERABOX_NDUS: ${isProcessEnvNdus ? 'YES' : 'NO'}${isProcessEnvNdus ? ` (length=${ndusLen})` : ''}`);
-  console.log(`[TeraBox Auth] config.TERABOX_NDUS: ${isConfigNdus ? 'YES' : 'NO'}${isConfigNdus ? ` (length=${ndusLen})` : ''}`);
+  console.log(`[TeraBox Auth] TERABOX_NDUS configured: ${isConfigNdus ? 'YES' : 'NO'}`);
+  console.log(`[TeraBox Auth] Environment variable length: ${ndusLen}`);
+  console.log(`[TeraBox Auth] Credential format: ${credentialFormat}`);
+  console.log(`[TeraBox Auth] process.env TERABOX_NDUS: ${isProcessEnvNdus ? 'YES' : 'NO'}`);
+  console.log(`[TeraBox Auth] config.TERABOX_NDUS: ${isConfigNdus ? 'YES' : 'NO'}`);
   console.log(`[TeraBox Auth] Resolver NDUS: ${isConfigNdus ? 'YES' : 'NO'}`);
   console.log(`[TeraBox Auth] Configuration source: environment`);
 }
+
 
 
 
