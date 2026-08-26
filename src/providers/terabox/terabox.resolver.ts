@@ -43,6 +43,13 @@ export interface TeraBoxShareMetadata {
   fileList: TeraBoxFileItem[];
 }
 
+export interface TeraBoxDownloadResult {
+  fileName: string;
+  size?: number;
+  downloadUrl: string;
+  source: string;
+}
+
 export interface TeraBoxResolvedFile {
   fileName: string;
   fileSize: number;
@@ -695,6 +702,17 @@ export class TeraBoxResolver {
 
       const downloadEndpoint = `${this.UNOFFICIAL_API_BASE}/share/download?app_id=250528`;
 
+      logger.info(`[TeraBox] Strategy selected: dynamic /share/download RPC`);
+      logger.info(
+        `[TeraBox] Authentication: ndus=${config.TERABOX_NDUS ? 'YES' : 'NO'}, jsToken=${activeJsToken ? 'YES' : 'NO'}, cookies=${activeCookies ? 'YES' : 'NO'}`
+      );
+      logger.info(`[TeraBox] Reference endpoint: ${new URL(downloadEndpoint).hostname}${new URL(downloadEndpoint).pathname}`);
+
+      const combinedCookies = [
+        activeCookies,
+        config.TERABOX_NDUS ? `ndus=${config.TERABOX_NDUS}` : '',
+      ].filter(Boolean).join('; ');
+
       const downloadRes = await this.safeFetch(downloadEndpoint, {
         method: 'POST',
         headers: {
@@ -702,7 +720,7 @@ export class TeraBoxResolver {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
           'Referer': `https://dm.terabox.app/sharing/link?surl=1${shareCode}`,
           'Origin': 'https://www.terabox.app',
-          ...(activeCookies ? { 'Cookie': activeCookies } : {}),
+          ...(combinedCookies ? { Cookie: combinedCookies } : {}),
         },
         data: new URLSearchParams({
           product: 'share',
@@ -815,13 +833,7 @@ export class TeraBoxResolver {
     try {
       const parsed = new URL(downloadUrl);
       logger.info(
-        `[TeraBox] Valid download URL resolved: ` +
-          JSON.stringify({
-            protocol: parsed.protocol,
-            hostname: parsed.hostname,
-            pathname: parsed.pathname.slice(0, 80),
-            queryKeys: [...parsed.searchParams.keys()],
-          })
+        `[TeraBox] Direct URL: resolved=YES, hostname=${parsed.hostname}, pathPrefix=${parsed.pathname.slice(0, 30)}, queryKeys=[${[...parsed.searchParams.keys()].join(', ')}]`
       );
     } catch {}
 
