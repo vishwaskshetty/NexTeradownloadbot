@@ -35,6 +35,27 @@ bot.catch(async (err: unknown, ctx) => {
   handleError(err as Error, ctx);
 });
 
+// Diagnostic Health Update Interceptor
+bot.use(async (ctx, next) => {
+  if (ctx.message && 'text' in ctx.message) {
+    const updateId = ctx.update.update_id;
+    console.log(`[Telegram Health] update_id received: ${updateId}`);
+    console.log(`[Telegram Health] update accepted: YES`);
+    console.log(`[Telegram Health] MESSAGE RECEIVED`);
+    if (ctx.message.text.startsWith('/start')) {
+      console.log(`[Telegram Health] START RECEIVED`);
+      console.log(`[Telegram Health] Sending test response`);
+      try {
+        await ctx.reply('Telegram polling is working.');
+        console.log(`[Telegram Health] Test response sent: YES`);
+      } catch (e: any) {
+        console.error(`[Telegram Health] Test response failed: ${e.message}`);
+      }
+    }
+  }
+  return next();
+});
+
 // Middleware
 import { rateLimitMiddleware } from './bot/middleware/rateLimit';
 bot.use(rateLimitMiddleware);

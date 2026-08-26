@@ -123,6 +123,12 @@ export class TelegramPollingManager {
       return;
     }
 
+    if (process.env.TELEGRAM_POLLING_DIAGNOSTIC_ONLY === 'true') {
+      logger.info(`[Telegram Polling] TELEGRAM_POLLING_DIAGNOSTIC_ONLY=true: Bypassing Redis lock for standalone polling.`);
+      await this.launchPolling();
+      return;
+    }
+
     await this.tryAcquireAndStart();
   }
 
@@ -173,12 +179,19 @@ export class TelegramPollingManager {
     }
 
     try {
-      logger.info(`[Telegram Polling] Testing bot token for instance ${this.instanceId}...`);
+      logger.info(`[Telegram Health] BOT_TOKEN configured: YES`);
       const me = await this.bot.telegram.getMe();
+      logger.info(`[Telegram Health] getMe: SUCCESS`);
+      logger.info(`[Telegram Health] Bot username: @${me.username}`);
       logger.info(`[Telegram Polling] Bot initialized successfully (@${me.username})`);
+
+      const webhookInfo = await this.bot.telegram.getWebhookInfo().catch(() => ({ url: '', pending_update_count: 0 }));
+      logger.info(`[Telegram Health] Webhook URL: ${webhookInfo.url || '<empty>'}`);
+      logger.info(`[Telegram Health] Pending updates: ${webhookInfo.pending_update_count ?? 0}`);
 
       logger.info(`[Telegram Polling] Removing leftover webhooks...`);
       await this.bot.telegram.deleteWebhook({ drop_pending_updates: false });
+      logger.info(`[Telegram Health] Webhook removed: YES`);
     } catch (e: any) {
       if (e?.response?.error_code === 409 || e?.message?.includes('409') || e?.message?.includes('Conflict')) {
         await this.handleConflict();
@@ -188,6 +201,8 @@ export class TelegramPollingManager {
     }
 
     this.isPollingActive = true;
+    logger.info(`[Telegram Health] Polling started: YES`);
+    logger.info(`[Telegram Health] Polling process alive`);
     logger.info(`[Telegram Polling] Polling active: YES`);
     logger.info(`🚀 [Telegram Polling] Starting long-polling on instance ${this.instanceId}...`);
 
