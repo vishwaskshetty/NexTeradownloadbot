@@ -338,7 +338,12 @@ export class TeraBoxResolver {
       throw new NotFoundError('❌ File is unavailable or private');
     }
 
-    logger.info(`[TeraBox] Selected fs_id: ${file.fs_id}`);
+    logger.info(`[TeraBox Debug] Selected fs_id: ${file.fs_id}`);
+    logger.info(`[TeraBox Debug] File keys: ${Object.keys(file).join(', ')}`);
+    logger.info(`[TeraBox Debug] dlink present: ${Boolean(file.dlink ? 'YES' : 'NO')}`);
+    logger.info(`[TeraBox Debug] download_url present: ${Boolean((file as any).download_url || (file as any).downloadUrl ? 'YES' : 'NO')}`);
+    logger.info(`[TeraBox Debug] sign present: ${Boolean(shareMetadata.sign ? 'YES' : 'NO')}`);
+    logger.info(`[TeraBox Debug] timestamp present: ${Boolean(shareMetadata.timestamp ? 'YES' : 'NO')}`);
 
     const shareCode = shareMetadata.surl;
     const fileName = file.server_filename || file.filename || `terabox_${shareCode}.file`;
@@ -355,10 +360,12 @@ export class TeraBoxResolver {
     const candidates = [
       { source: 'file.dlink', url: file.dlink },
       { source: 'file.downloadUrl', url: (file as any).downloadUrl },
-      { source: 'gateway', url: gwRes?.downloadUrl },
-      { source: 'gateway', url: gwRes?.dlink },
-      { source: 'gateway.data', url: gwRes?.data?.downloadUrl },
-      { source: 'gateway.data', url: gwRes?.data?.dlink },
+      { source: 'file.download_url', url: (file as any).download_url },
+      { source: 'file.url', url: (file as any).url },
+      { source: 'file.direct_link', url: (file as any).direct_link },
+      { source: 'gateway', url: gwRes?.downloadUrl || gwRes?.dlink || gwRes?.direct_link || gwRes?.url },
+      { source: 'gateway.data', url: gwRes?.data?.downloadUrl || gwRes?.data?.dlink || gwRes?.data?.direct_link || gwRes?.data?.url },
+      { source: 'gateway.list', url: gwRes?.list?.[0]?.dlink || gwRes?.list?.[0]?.downloadUrl },
     ];
 
     let downloadUrl: string | null = null;
@@ -369,6 +376,53 @@ export class TeraBoxResolver {
         downloadUrl = c.url;
         selectedSource = c.source;
         break;
+      }
+    }
+
+    // Dynamic HTML jsToken + session cookie RPC
+    if (!downloadUrl && shareMetadata.shareId && shareMetadata.uk) {
+      try {
+        const pageRes = await axios.get(`https://www.terabox.app/sharing/link?surl=${shareCode}`, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          },
+          timeout: 10000,
+        });
+
+        const html = pageRes.data;
+        const jsTokenMatch = html.match(/fn%28%22([A-Fa-f0-9]+)%22%29/) || decodeURIComponent(html).match(/fn\("([A-Fa-f0-9]+)"\)/);
+        const jsToken = jsTokenMatch ? jsTokenMatch[1] : undefined;
+        const pageCookies = pageRes.headers['set-cookie'] ? pageRes.headers['set-cookie'].map((c: string) => c.split(';')[0]).join('; ') : '';
+
+        if (jsToken) {
+          logger.info(`[TeraBox Debug] jsToken present: YES`);
+          const downloadRes = await this.safeFetch(`${this.UNOFFICIAL_API_BASE}/share/download?app_id=250528&web=1&channel=dubox&clienttype=0&jsToken=${jsToken}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+              'Referer': `https://www.terabox.app/sharing/link?surl=${shareCode}`,
+              ...(pageCookies ? { 'Cookie': pageCookies } : {}),
+            },
+            data: new URLSearchParams({
+              share_id: String(shareMetadata.shareId),
+              uk: String(shareMetadata.uk),
+              sign: shareMetadata.sign || '',
+              timestamp: String(shareMetadata.timestamp || Math.floor(Date.now() / 1000)),
+              fid_list: JSON.stringify([file.fs_id]),
+              primaryid: String(shareMetadata.shareId),
+            }).toString(),
+          });
+
+          const rUrl = downloadRes?.dlink || downloadRes?.download_url || downloadRes?.downloadUrl || downloadRes?.list?.[0]?.dlink;
+          if (rUrl && /^https?:\/\//i.test(rUrl)) {
+            downloadUrl = rUrl;
+            selectedSource = 'dynamic /share/download with jsToken';
+          }
+        }
+      } catch (err: any) {
+        logger.warn(`[TeraBox] Dynamic jsToken resolution failed: ${err.message}`);
       }
     }
 
@@ -391,8 +445,9 @@ export class TeraBoxResolver {
             primaryid: String(shareMetadata.shareId),
           }).toString()
         });
-        if (downloadRes && (downloadRes.dlink || downloadRes.list?.[0]?.dlink)) {
-          downloadUrl = downloadRes.dlink || downloadRes.list[0].dlink;
+        const rUrl = downloadRes?.dlink || downloadRes?.download_url || downloadRes?.downloadUrl || downloadRes?.list?.[0]?.dlink;
+        if (rUrl && /^https?:\/\//i.test(rUrl)) {
+          downloadUrl = rUrl;
           selectedSource = 'unofficial /share/download';
         }
       } catch {}
@@ -412,7 +467,7 @@ export class TeraBoxResolver {
       );
     }
 
-    logger.info(`[TeraBox] Direct URL source: ${selectedSource}`);
+    logger.info(`[TeraBox] Direct URL candidate: RECEIVED (Source: ${selectedSource})`);
 
     const headers: Record<string, string> = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
