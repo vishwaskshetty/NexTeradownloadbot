@@ -178,7 +178,7 @@ export class TelegramPollingManager {
       logger.info(`[Telegram Polling] Bot initialized successfully (@${me.username})`);
 
       logger.info(`[Telegram Polling] Removing leftover webhooks...`);
-      await this.bot.telegram.deleteWebhook({ drop_pending_updates: true });
+      await this.bot.telegram.deleteWebhook({ drop_pending_updates: false });
     } catch (e: any) {
       if (e?.response?.error_code === 409 || e?.message?.includes('409') || e?.message?.includes('Conflict')) {
         await this.handleConflict();
@@ -188,10 +188,11 @@ export class TelegramPollingManager {
     }
 
     this.isPollingActive = true;
+    logger.info(`[Telegram Polling] Polling active: YES`);
     logger.info(`🚀 [Telegram Polling] Starting long-polling on instance ${this.instanceId}...`);
 
     this.bot
-      .launch({ dropPendingUpdates: true })
+      .launch({ dropPendingUpdates: false })
       .catch(async (err: any) => {
         if (err?.response?.error_code === 409 || err?.message?.includes('409') || err?.message?.includes('Conflict')) {
           await this.handleConflict();
