@@ -185,21 +185,35 @@ export const start = async () => {
 
     // 2. Connect/check Redis
     if (config.NODE_ENV !== 'test') {
-      try {
-        logger.info('Checking Redis...');
-        const { redis } = require('./redis');
-        const maskedRedisUrl = (config.REDIS_URL || '').replace(/:([^:@]+)@/, ':***@');
-        logger.info(`[Redis] Connecting to: ${maskedRedisUrl}`);
-        await Promise.race([
-          redis.ping(),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('Redis ping timed out after 15s')), 15000)
-          ),
-        ]);
-        logger.info('Redis connected successfully\n');
-      } catch (err: any) {
-        const maskedRedisUrl = (config.REDIS_URL || '').replace(/:([^:@]+)@/, ':***@');
-        logger.error(`[Redis] Connection failed: ${err.message}`);
+      const { redis } = require('./redis');
+      const maskedRedisUrl = (config.REDIS_URL || '').replace(/:([^:@]+)@/, ':***@');
+      logger.info('Checking Redis...');
+      logger.info(`[Redis] Connecting to: ${maskedRedisUrl}`);
+      
+      let redisConnected = false;
+      let lastRedisError: any = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          await Promise.race([
+            redis.ping(),
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error('Redis ping timeout')), 10000)
+            ),
+          ]);
+          redisConnected = true;
+          logger.info('Redis connected successfully\n');
+          break;
+        } catch (err: any) {
+          lastRedisError = err;
+          if (attempt < 3) {
+            logger.warn(`[Redis] Connection attempt ${attempt} failed: ${err.message}. Retrying in 2s...`);
+            await new Promise(r => setTimeout(r, 2000));
+          }
+        }
+      }
+
+      if (!redisConnected) {
+        logger.error(`[Redis] Connection failed after 3 attempts: ${lastRedisError?.message ?? lastRedisError}`);
         logger.error(`[Redis] Check REDIS_URL in .env — currently: ${maskedRedisUrl}`);
         throw new Error('Redis connection failed during startup health check.');
       }
