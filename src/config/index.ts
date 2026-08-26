@@ -49,3 +49,12 @@ if (!_env.success) {
 }
 
 export const config = _env.data;
+
+const isNdusConfigured = typeof config.TERABOX_NDUS === 'string' && config.TERABOX_NDUS.trim().length > 0;
+if (process.env.NODE_ENV !== 'test') {
+  console.log(`[Config] TERABOX_NDUS loaded: ${isNdusConfigured ? 'YES' : 'NO'}`);
+  console.log(`[TeraBox Auth] TERABOX_NDUS configured: ${isNdusConfigured ? 'YES' : 'NO'}`);
+  console.log(`[TeraBox Auth] Configuration source: environment`);
+}
+
+

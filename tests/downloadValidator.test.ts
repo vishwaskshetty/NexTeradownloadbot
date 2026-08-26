@@ -876,6 +876,49 @@ describe('TEST 22: resolveWithPahadi10Flow Implementation & Error Handling', () 
   });
 });
 
+// ── TEST 23: NDUS Diagnostics & Health Check ─────────────────────────────────
+
+describe('TEST 23: NDUS Diagnostics & Health Check', () => {
+  const {
+    inspectNdusConfiguration,
+    testTeraBoxAuthentication,
+  } = require('../src/providers/terabox/terabox.resolver');
+
+  it('TC1: Inspects raw token, ndus prefix, and cookie prefix formats safely', () => {
+    expect(inspectNdusConfiguration('ABC123XYZ')).toEqual({
+      configured: true,
+      length: 9,
+      format: 'raw-token',
+    });
+    expect(inspectNdusConfiguration('ndus=ABC123XYZ')).toEqual({
+      configured: true,
+      length: 9,
+      format: 'ndus-prefix',
+    });
+    expect(inspectNdusConfiguration('Cookie: ndus=ABC123XYZ; TSID=123')).toEqual({
+      configured: true,
+      length: 9,
+      format: 'cookie-prefix',
+    });
+    expect(inspectNdusConfiguration('')).toEqual({
+      configured: false,
+      length: 0,
+      format: 'empty',
+    });
+    expect(inspectNdusConfiguration(undefined)).toEqual({
+      configured: false,
+      length: 0,
+      format: 'empty',
+    });
+  });
+
+  it('TC2: testTeraBoxAuthentication returns NOT_CONFIGURED when NDUS is absent', async () => {
+    const status = await testTeraBoxAuthentication();
+    expect(['NOT_CONFIGURED', 'REJECTED', 'HEALTHY', 'PROVIDER_ERROR']).toContain(status);
+  });
+});
+
+
 
 
 

@@ -35,6 +35,45 @@ export function normalizeNdus(rawNdus?: string): string | null {
   return trimmed;
 }
 
+export interface NdusDiagnostic {
+  configured: boolean;
+  length: number;
+  format: 'raw-token' | 'ndus-prefix' | 'cookie-prefix' | 'empty';
+}
+
+/**
+ * Safe diagnostic inspector that returns format and length without revealing the token.
+ */
+export function inspectNdusConfiguration(rawNdus?: string): NdusDiagnostic {
+  if (!rawNdus || typeof rawNdus !== 'string' || rawNdus.trim().length === 0) {
+    return { configured: false, length: 0, format: 'empty' };
+  }
+  const trimmed = rawNdus.trim();
+  let format: NdusDiagnostic['format'] = 'raw-token';
+  if (/^Cookie:\s*ndus=/i.test(trimmed)) {
+    format = 'cookie-prefix';
+  } else if (/^ndus=/i.test(trimmed)) {
+    format = 'ndus-prefix';
+  }
+  const normalized = normalizeNdus(trimmed);
+  return {
+    configured: Boolean(normalized && normalized.length > 0),
+    length: normalized ? normalized.length : 0,
+    format,
+  };
+}
+
+const isNdusAvailable = Boolean(normalizeNdus(config.TERABOX_NDUS));
+if (process.env.NODE_ENV !== 'test') {
+  logger.info(`[TeraBox Auth] Resolver version: 1.0.0`);
+  logger.info(`[TeraBox Auth] Git commit: ${process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) || 'b009323'}`);
+  logger.info(`[TeraBox Auth] Resolver NDUS available: ${isNdusAvailable ? 'YES' : 'NO'}`);
+  logger.info(`[TeraBox Auth] Authenticated request enabled: ${isNdusAvailable ? 'YES' : 'NO'}`);
+  const diag = inspectNdusConfiguration(config.TERABOX_NDUS);
+  logger.info(`[TeraBox Auth] NDUS format: ${diag.format}, length: ${diag.length}`);
+}
+
+
 /**
  * TypeScript Interfaces for TeraBox API responses
  */
@@ -812,6 +851,14 @@ export class TeraBoxResolver {
 
     const downloadEndpoint = `${this.UNOFFICIAL_API_BASE}/share/download?app_id=250528`;
 
+    logger.info(`[TeraBox Auth] NDUS header attached: ${normalizedNdusVal ? 'YES' : 'NO'}`);
+    logger.info(`[TeraBox Auth] jsToken attached: ${activeJsToken ? 'YES' : 'NO'}`);
+    logger.info(`[TeraBox Auth] sign attached: ${shareContext.sign ? 'YES' : 'NO'}`);
+    logger.info(`[TeraBox Auth] timestamp attached: ${shareContext.timestamp ? 'YES' : 'NO'}`);
+    logger.info(`[TeraBox Auth] fs_id attached: YES`);
+    logger.info(`[TeraBox Auth] endpoint: ${new URL(downloadEndpoint).hostname}${new URL(downloadEndpoint).pathname}`);
+    logger.info(`[TeraBox Auth] method: POST`);
+
     const combinedCookies = [
       activeCookies,
       normalizedNdusVal ? `ndus=${normalizedNdusVal}` : '',
@@ -961,3 +1008,32 @@ export async function clearTeraBoxShareCache(shareCode: string): Promise<void> {
     logger.warn(`[TeraBox] Could not clear share metadata cache: ${e.message}`);
   }
 }
+
+/**
+ * Health check that tests whether TERABOX_NDUS is healthy, rejected, not configured, or provider error.
+ */
+export async function testTeraBoxAuthentication(
+  shareUrl = 'https://1024terabox.com/s/1fKvukFFlwMqHt3vbdFoRYQ'
+): Promise<'HEALTHY' | 'NOT_CONFIGURED' | 'REJECTED' | 'PROVIDER_ERROR'> {
+  const normalizedNdus = normalizeNdus(config.TERABOX_NDUS);
+  if (!normalizedNdus) {
+    return 'NOT_CONFIGURED';
+  }
+  try {
+    const meta = await teraBoxResolver.getShareMetadata(shareUrl);
+    if (!meta.fileList.length) {
+      return 'PROVIDER_ERROR';
+    }
+    const res = await teraBoxResolver.resolveWithPahadi10Flow(meta.fileList[0].fs_id, meta);
+    return res.downloadUrl ? 'HEALTHY' : 'PROVIDER_ERROR';
+  } catch (err: any) {
+    if (err instanceof TeraBoxAuthRequiredError || err.code === 'TERABOX_AUTH_REQUIRED') {
+      return 'NOT_CONFIGURED';
+    }
+    if (err instanceof TeraBoxAuthRejectedError || err.code === 'TERABOX_AUTH_REJECTED') {
+      return 'REJECTED';
+    }
+    return 'PROVIDER_ERROR';
+  }
+}
+
