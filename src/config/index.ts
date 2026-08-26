@@ -50,11 +50,17 @@ if (!_env.success) {
 
 export const config = _env.data;
 
-const isNdusConfigured = typeof config.TERABOX_NDUS === 'string' && config.TERABOX_NDUS.trim().length > 0;
+const isProcessEnvNdus = typeof process.env.TERABOX_NDUS === 'string' && process.env.TERABOX_NDUS.trim().length > 0;
+const isConfigNdus = typeof config.TERABOX_NDUS === 'string' && config.TERABOX_NDUS.trim().length > 0;
+const ndusLen = isConfigNdus ? config.TERABOX_NDUS!.trim().length : 0;
+
 if (process.env.NODE_ENV !== 'test') {
-  console.log(`[Config] TERABOX_NDUS loaded: ${isNdusConfigured ? 'YES' : 'NO'}`);
-  console.log(`[TeraBox Auth] TERABOX_NDUS configured: ${isNdusConfigured ? 'YES' : 'NO'}`);
+  console.log(`[Config] TERABOX_NDUS loaded: ${isConfigNdus ? 'YES' : 'NO'}`);
+  console.log(`[TeraBox Auth] process.env TERABOX_NDUS: ${isProcessEnvNdus ? 'YES' : 'NO'}${isProcessEnvNdus ? ` (length=${ndusLen})` : ''}`);
+  console.log(`[TeraBox Auth] config.TERABOX_NDUS: ${isConfigNdus ? 'YES' : 'NO'}${isConfigNdus ? ` (length=${ndusLen})` : ''}`);
+  console.log(`[TeraBox Auth] Resolver NDUS: ${isConfigNdus ? 'YES' : 'NO'}`);
   console.log(`[TeraBox Auth] Configuration source: environment`);
 }
+
 
 

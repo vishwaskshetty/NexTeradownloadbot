@@ -65,9 +65,14 @@ export function inspectNdusConfiguration(rawNdus?: string): NdusDiagnostic {
 
 const isNdusAvailable = Boolean(normalizeNdus(config.TERABOX_NDUS));
 if (process.env.NODE_ENV !== 'test') {
+  const isProcessEnvNdus = typeof process.env.TERABOX_NDUS === 'string' && process.env.TERABOX_NDUS.trim().length > 0;
+  const isConfigNdus = typeof config.TERABOX_NDUS === 'string' && config.TERABOX_NDUS.trim().length > 0;
+  const ndusLen = isConfigNdus ? config.TERABOX_NDUS!.trim().length : 0;
   logger.info(`[TeraBox Auth] Resolver version: 1.0.0`);
-  logger.info(`[TeraBox Auth] Git commit: ${process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) || 'b009323'}`);
-  logger.info(`[TeraBox Auth] Resolver NDUS available: ${isNdusAvailable ? 'YES' : 'NO'}`);
+  logger.info(`[TeraBox Auth] Git commit: ${process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) || 'a362d01'}`);
+  logger.info(`[TeraBox Auth] process.env TERABOX_NDUS: ${isProcessEnvNdus ? 'YES' : 'NO'}${isProcessEnvNdus ? ` (length=${ndusLen})` : ''}`);
+  logger.info(`[TeraBox Auth] config.TERABOX_NDUS: ${isConfigNdus ? 'YES' : 'NO'}${isConfigNdus ? ` (length=${ndusLen})` : ''}`);
+  logger.info(`[TeraBox Auth] Resolver NDUS: ${isNdusAvailable ? 'YES' : 'NO'}`);
   logger.info(`[TeraBox Auth] Authenticated request enabled: ${isNdusAvailable ? 'YES' : 'NO'}`);
   const diag = inspectNdusConfiguration(config.TERABOX_NDUS);
   logger.info(`[TeraBox Auth] NDUS format: ${diag.format}, length: ${diag.length}`);
