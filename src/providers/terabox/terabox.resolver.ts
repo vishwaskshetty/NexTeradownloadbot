@@ -285,6 +285,32 @@ export function hasTeraBoxCredentials(): boolean {
   );
 }
 
+/**
+ * Validates that all required cryptographic and session parameters
+ * are present and well-formed before calling /share/download
+ */
+export function validateDownloadContext(context: {
+  shareId?: string;
+  uk?: string;
+  sign?: string;
+  timestamp?: number | string;
+  fsId?: string | number;
+}): void {
+  const missing: string[] = [];
+  if (!context.shareId || context.shareId.trim() === '') missing.push('shareId');
+  if (!context.uk || context.uk.trim() === '') missing.push('uk');
+  if (!context.sign || context.sign.trim() === '') missing.push('sign');
+  if (!context.timestamp || String(context.timestamp).trim() === '' || Number.isNaN(Number(context.timestamp))) missing.push('timestamp');
+  if (!context.fsId || String(context.fsId).trim() === '') missing.push('fsId');
+
+  if (missing.length > 0) {
+    throw new TeraBoxMissingContextError(
+      `TeraBox download context validation failed. Missing required fields: ${missing.join(', ')}`
+    );
+  }
+}
+
+
 export class TeraBoxResolver {
   private readonly OFFICIAL_API_BASE = 'https://openapi.terabox.com';
   private readonly UNOFFICIAL_API_BASE = 'https://www.terabox.app';
@@ -629,21 +655,35 @@ export class TeraBoxResolver {
     // Dynamic HTML jsToken + session cookie RPC
     if (!downloadUrl) {
       // Validate share context required fields before calling download endpoint
-      if (!shareMetadata.shareId || !shareMetadata.uk || !shareMetadata.sign || !shareMetadata.timestamp || !file.fs_id) {
-        logger.error(
-          `[TeraBox] Missing required share context: ` +
-            JSON.stringify({
-              sign: shareMetadata.sign ? 'YES' : 'NO',
-              timestamp: shareMetadata.timestamp ? 'YES' : 'NO',
-              shareId: shareMetadata.shareId ? 'YES' : 'NO',
-              uk: shareMetadata.uk ? 'YES' : 'NO',
-              fs_id: file.fs_id ? 'YES' : 'NO',
-            })
-        );
-        throw new TeraBoxMissingContextError(
-          `TeraBox share context missing required parameters (sign=${Boolean(shareMetadata.sign)}, timestamp=${Boolean(shareMetadata.timestamp)})`
-        );
-      }
+      validateDownloadContext({
+        shareId: shareMetadata.shareId,
+        uk: shareMetadata.uk,
+        sign: shareMetadata.sign,
+        timestamp: shareMetadata.timestamp,
+        fsId: file.fs_id,
+      });
+
+      const cookieNames = activeCookies ? activeCookies.split(';').map(c => c.trim().split('=')[0]).filter(Boolean) : [];
+      logger.info(
+        `[TeraBox Debug] Pre-Download Request Audit: ` +
+          JSON.stringify({
+            shareId: shareMetadata.shareId,
+            uk: shareMetadata.uk,
+            fs_id: file.fs_id,
+            signPresent: Boolean(shareMetadata.sign),
+            signLength: shareMetadata.sign ? shareMetadata.sign.length : 0,
+            timestamp: shareMetadata.timestamp,
+            jsTokenPresent: Boolean(activeJsToken),
+            cookieNames,
+            queryParams: ['app_id', 'web', 'channel', 'clienttype', ...(activeJsToken ? ['jsToken'] : []), 'shareid', 'sign', 'timestamp'],
+            bodyParams: ['product', 'nozip', 'fid_list', 'uk', 'primaryid', 'shareid', 'sign', 'timestamp'],
+            targetHost: new URL(this.UNOFFICIAL_API_BASE).hostname,
+            targetPath: '/share/download',
+            httpMethod: 'POST',
+            contentType: 'application/x-www-form-urlencoded',
+            refererHost: 'dm.terabox.app',
+          })
+      );
 
       logger.info(`[TeraBox] Stage 6: Requesting download URL for fs_id ${file.fs_id}`);
 
@@ -685,12 +725,22 @@ export class TeraBoxResolver {
 
       if (downloadRes && downloadRes.errno !== undefined && Number(downloadRes.errno) !== 0) {
         const safeMsg = typeof downloadRes.errmsg === 'string' ? downloadRes.errmsg : 'parameter error';
-        logger.warn(`[TeraBox] Provider rejected download request: errno=${downloadRes.errno}, errmsg=${safeMsg}`);
+        const requestId = downloadRes.request_id ?? downloadRes.request_id_string ?? '';
+        logger.warn(
+          `[TeraBox] Stage 7: Provider rejected download request: ` +
+            JSON.stringify({
+              errno: Number(downloadRes.errno),
+              errmsg: safeMsg,
+              requestId: String(requestId),
+              keys: Object.keys(downloadRes),
+              dataKeys: downloadRes.data && typeof downloadRes.data === 'object' ? Object.keys(downloadRes.data) : undefined,
+            })
+        );
         throw new TeraBoxProviderError(
           `TeraBox download request rejected: errno=${downloadRes.errno}, errmsg=${safeMsg}`,
           'download',
           Number(downloadRes.errno),
-          String(downloadRes.request_id || '')
+          String(requestId)
         );
       }
 

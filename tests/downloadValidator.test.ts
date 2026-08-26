@@ -659,3 +659,71 @@ describe('TEST 18: TeraBox Resolver Session & Share Context Lifecycle', () => {
     expect(session.jsToken).toBe('ABC123');
   });
 });
+
+// ── TEST 19: validateDownloadContext & Pre-Download Verification ─────────────
+
+describe('TEST 19: validateDownloadContext & Pre-Download Verification', () => {
+  const { validateDownloadContext } = require('../src/providers/terabox/terabox.resolver');
+  const { TeraBoxMissingContextError } = require('../src/providers/errors');
+
+  it('TC1: Passes with full valid context', () => {
+    expect(() =>
+      validateDownloadContext({
+        shareId: '62706158116',
+        uk: '4399182195115',
+        sign: 'd74dd7c834e8c6b6da979fd96376cb36bda6d156',
+        timestamp: 1787739968,
+        fsId: '207400602392562',
+      })
+    ).not.toThrow();
+  });
+
+  it('TC2: Fails when shareId is missing', () => {
+    expect(() =>
+      validateDownloadContext({
+        shareId: '',
+        uk: '4399182195115',
+        sign: 'd74dd7c834e8c6b6da979fd96376cb36bda6d156',
+        timestamp: 1787739968,
+        fsId: '207400602392562',
+      })
+    ).toThrow(TeraBoxMissingContextError);
+  });
+
+  it('TC3: Fails when sign is missing or empty', () => {
+    expect(() =>
+      validateDownloadContext({
+        shareId: '62706158116',
+        uk: '4399182195115',
+        sign: '   ',
+        timestamp: 1787739968,
+        fsId: '207400602392562',
+      })
+    ).toThrow(TeraBoxMissingContextError);
+  });
+
+  it('TC4: Fails when timestamp is NaN or empty', () => {
+    expect(() =>
+      validateDownloadContext({
+        shareId: '62706158116',
+        uk: '4399182195115',
+        sign: 'd74dd7c834e8c6b6da979fd96376cb36bda6d156',
+        timestamp: 'invalid-time',
+        fsId: '207400602392562',
+      })
+    ).toThrow(TeraBoxMissingContextError);
+  });
+
+  it('TC5: Fails when fsId is missing', () => {
+    expect(() =>
+      validateDownloadContext({
+        shareId: '62706158116',
+        uk: '4399182195115',
+        sign: 'd74dd7c834e8c6b6da979fd96376cb36bda6d156',
+        timestamp: 1787739968,
+        fsId: '',
+      })
+    ).toThrow(TeraBoxMissingContextError);
+  });
+});
+
