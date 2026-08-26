@@ -136,19 +136,26 @@ export class TelegramPollingManager {
       this.retryTimer = null;
     }
 
+    logger.info(`[Telegram Polling] Attempting to acquire lock for instance ${this.instanceId}...`);
+
     const acquired = await this.acquireLock();
     const currentOwner = (await redis.get(this.lockKey).catch(() => null)) || 'unknown';
     const currentTtl = (await redis.pttl(this.lockKey).catch(() => 0)) || 0;
 
-    logger.info(`[Telegram Polling] Instance ID: ${this.instanceId}`);
-    logger.info(`[Telegram Polling] Lock acquired: ${acquired ? 'YES' : 'NO'}`);
-    logger.info(`[Telegram Polling] Current lock owner: ${currentOwner}`);
-    logger.info(`[Telegram Polling] Lock TTL: ${currentTtl > 0 ? currentTtl : (acquired ? this.lockTtlMs : 0)} ms`);
-    logger.info(`[Telegram Polling] Polling active: ${acquired ? 'YES' : 'NO'}`);
-
     if (acquired) {
+      logger.info(`[Telegram Polling] Lock acquired by ${this.instanceId}`);
+      logger.info(`[Telegram Polling] Current lock owner: ${this.instanceId}`);
+      logger.info(`[Telegram Polling] Lock TTL: ${this.lockTtlMs} ms`);
+      logger.info(`[Telegram Polling] Polling active: YES`);
       await this.launchPolling();
     } else {
+      if (currentTtl <= 0) {
+        logger.info(`[Telegram Polling] Stale lock detected, recovering...`);
+      }
+      logger.info(`[Telegram Polling] Lock held by ${currentOwner}, running worker/HTTP only (TTL: ${currentTtl > 0 ? currentTtl : 0} ms)`);
+      logger.info(`[Telegram Polling] Lock acquired: NO`);
+      logger.info(`[Telegram Polling] Polling active: NO`);
+
       // Standby replica / candidate: retry acquisition in background with jitter
       const jitterMs = Math.floor(Math.random() * 4000);
       const nextDelay = this.retryIntervalMs + jitterMs;
