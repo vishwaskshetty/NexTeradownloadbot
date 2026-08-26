@@ -392,11 +392,16 @@ export const initWorker = () => {
             : await adapter.resolve(url);
         } catch (resolveErr: any) {
           logger.error(`[Download] Attempt ${attempt}: Failed to resolve URL — ${resolveErr.message}`);
-          if (attempt < maxRetries) {
-            await new Promise(r => setTimeout(r, 3000 * attempt));
-            continue;
+          const isDeterministic = 
+            resolveErr.name === 'ProviderUnavailableError' || 
+            resolveErr.name === 'InvalidUrlError' || 
+            resolveErr.name === 'NotFoundError';
+          
+          if (isDeterministic || attempt >= maxRetries) {
+            throw resolveErr;
           }
-          throw resolveErr;
+          await new Promise(r => setTimeout(r, 3000 * attempt));
+          continue;
         }
 
         const downloadUrl = resolvedFile.downloadUrl;

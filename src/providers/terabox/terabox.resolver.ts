@@ -60,23 +60,42 @@ export const TERABOX_DOMAINS = [
 ];
 
 /**
+ * Diagnostic logger for candidate values without leaking secrets or full signed URLs
+ */
+function describeCandidate(name: string, value: unknown): void {
+  logger.info(
+    `[TeraBox Debug] ${name}: ` +
+      JSON.stringify({
+        exists: value !== undefined && value !== null,
+        type: Array.isArray(value) ? 'array' : typeof value,
+        preview: typeof value === 'string' ? value.slice(0, 120) : undefined,
+        objectKeys:
+          value && typeof value === 'object' && !Array.isArray(value)
+            ? Object.keys(value as Record<string, unknown>)
+            : undefined,
+      })
+  );
+}
+
+/**
  * Safely extracts and validates a download URL from any candidate source value.
  * Handles:
  * - Direct strings, nested objects ({ url, dlink, download_url, downloadUrl, link }), arrays
- * - Escaped characters (\/, \u0026)
+ * - Escaped characters (\/, \u0026, &amp;)
  * - Safe URL decoding without double-decoding
  * - Protocol validation (http:, https:)
  */
-export function extractValidDownloadUrl(source: unknown): string | null {
-  if (!source) return null;
+export function extractTeraBoxDownloadUrl(input: unknown): string | null {
+  if (!input) return null;
 
-  if (typeof source === 'string') {
-    let cleaned = source.trim();
+  if (typeof input === 'string') {
+    let cleaned = input.trim();
     if (!cleaned) return null;
 
-    // Unescape JSON escaped slashes and unicode
+    // Unescape JSON escaped slashes, html entities and unicode
     cleaned = cleaned.replace(/\\\//g, '/');
     cleaned = cleaned.replace(/\\u0026/g, '&');
+    cleaned = cleaned.replace(/&amp;/g, '&');
 
     // If it looks like a URL-encoded string, try safe decode
     if (cleaned.includes('%3A%2F%2F') || cleaned.includes('%3a%2f%2f')) {
@@ -95,16 +114,16 @@ export function extractValidDownloadUrl(source: unknown): string | null {
     }
   }
 
-  if (Array.isArray(source)) {
-    for (const item of source) {
-      const extracted = extractValidDownloadUrl(item);
+  if (Array.isArray(input)) {
+    for (const item of input) {
+      const extracted = extractTeraBoxDownloadUrl(item);
       if (extracted) return extracted;
     }
     return null;
   }
 
-  if (typeof source === 'object' && source !== null) {
-    const obj = source as Record<string, any>;
+  if (typeof input === 'object' && input !== null) {
+    const obj = input as Record<string, any>;
     const priorityKeys = [
       'dlink',
       'download_url',
@@ -118,24 +137,26 @@ export function extractValidDownloadUrl(source: unknown): string | null {
 
     for (const key of priorityKeys) {
       if (obj[key] !== undefined && obj[key] !== null) {
-        const extracted = extractValidDownloadUrl(obj[key]);
+        const extracted = extractTeraBoxDownloadUrl(obj[key]);
         if (extracted) return extracted;
       }
     }
 
     if (obj.data) {
-      const extracted = extractValidDownloadUrl(obj.data);
+      const extracted = extractTeraBoxDownloadUrl(obj.data);
       if (extracted) return extracted;
     }
 
     if (obj.list) {
-      const extracted = extractValidDownloadUrl(obj.list);
+      const extracted = extractTeraBoxDownloadUrl(obj.list);
       if (extracted) return extracted;
     }
   }
 
   return null;
 }
+
+export const extractValidDownloadUrl = extractTeraBoxDownloadUrl;
 export function isSafeTeraBoxUrl(inputUrl: string): boolean {
   try {
     const parsed = new URL(inputUrl);
@@ -413,24 +434,28 @@ export class TeraBoxResolver {
     }
 
     logger.info(`[TeraBox Debug] Selected fs_id: ${file.fs_id}`);
-    logger.info(`[TeraBox Debug] File keys: ${Object.keys(file).join(', ')}`);
-    logger.info(`[TeraBox Debug] dlink type: ${typeof (file as any).dlink}`);
-    logger.info(`[TeraBox Debug] download_url type: ${typeof ((file as any).download_url || (file as any).downloadUrl)}`);
-    logger.info(`[TeraBox Debug] dlink value preview: ${String((file as any).dlink || 'none').slice(0, 300)}`);
-    logger.info(`[TeraBox Debug] download_url value preview: ${String((file as any).download_url || (file as any).downloadUrl || 'none').slice(0, 300)}`);
-    logger.info(`[TeraBox Debug] sign present: ${shareMetadata.sign ? 'YES' : 'NO'}`);
-    logger.info(`[TeraBox Debug] timestamp present: ${shareMetadata.timestamp ? 'YES' : 'NO'}`);
+    logger.info(`[TeraBox Debug] selected file keys: ${Object.keys(file).join(', ')}`);
+    describeCandidate('file.dlink', (file as any).dlink);
+    describeCandidate('file.download_url', (file as any).download_url);
+    describeCandidate('file.downloadUrl', (file as any).downloadUrl);
+    describeCandidate('shareMetadata.sign', shareMetadata.sign);
+    describeCandidate('shareMetadata.timestamp', shareMetadata.timestamp);
 
     const shareCode = shareMetadata.surl;
     const fileName = file.server_filename || file.filename || `terabox_${shareCode}.file`;
     const fileSize = Number(file.size || 0);
     const mimeType = this.categoryToMime(file.category);
 
+    logger.info(`[TeraBox] Resolving direct download URL for fs_id ${file.fs_id}`);
+
     let gwRes: any = null;
     if (config.TERABOX_GATEWAY_URL) {
       try {
         gwRes = await this.safeFetch(`${config.TERABOX_GATEWAY_URL}/api/get-info?shorturl=${shareCode}&fs_id=${file.fs_id}`);
-      } catch {}
+        describeCandidate('gatewayResponse', gwRes);
+      } catch (gwErr: any) {
+        logger.warn(`[TeraBox] Gateway request failed: ${gwErr.message}`);
+      }
     }
 
     const candidateSources = [
@@ -444,7 +469,7 @@ export class TeraBoxResolver {
     let selectedSource = 'none';
 
     for (const c of candidateSources) {
-      const extracted = extractValidDownloadUrl(c.data);
+      const extracted = extractTeraBoxDownloadUrl(c.data);
       if (extracted) {
         downloadUrl = extracted;
         selectedSource = c.source;
@@ -488,7 +513,8 @@ export class TeraBoxResolver {
             }).toString(),
           });
 
-          const extracted = extractValidDownloadUrl(downloadRes);
+          describeCandidate('dynamicDownloadRes', downloadRes);
+          const extracted = extractTeraBoxDownloadUrl(downloadRes);
           if (extracted) {
             downloadUrl = extracted;
             selectedSource = 'dynamic /share/download with jsToken';
@@ -518,7 +544,8 @@ export class TeraBoxResolver {
             primaryid: String(shareMetadata.shareId),
           }).toString()
         });
-        const extracted = extractValidDownloadUrl(downloadRes);
+        describeCandidate('unofficialDownloadRes', downloadRes);
+        const extracted = extractTeraBoxDownloadUrl(downloadRes);
         if (extracted) {
           downloadUrl = extracted;
           selectedSource = 'unofficial /share/download';
@@ -529,7 +556,8 @@ export class TeraBoxResolver {
     if (!downloadUrl && hasTeraBoxCredentials()) {
       try {
         const officialDlink = await this.getOfficialDownloadUrl(config.TERABOX_ACCESS_TOKEN!, String(file.fs_id), shareCode);
-        const extracted = extractValidDownloadUrl(officialDlink);
+        describeCandidate('officialDlink', officialDlink);
+        const extracted = extractTeraBoxDownloadUrl(officialDlink);
         if (extracted) {
           downloadUrl = extracted;
           selectedSource = 'official API';
@@ -545,6 +573,19 @@ export class TeraBoxResolver {
     }
 
     logger.info(`[TeraBox] Candidate URL extracted successfully (Source: ${selectedSource})`);
+
+    try {
+      const parsed = new URL(downloadUrl);
+      logger.info(
+        `[TeraBox] Valid download URL resolved: ` +
+          JSON.stringify({
+            protocol: parsed.protocol,
+            hostname: parsed.hostname,
+            pathname: parsed.pathname.slice(0, 80),
+            queryKeys: [...parsed.searchParams.keys()],
+          })
+      );
+    } catch {}
 
     const headers: Record<string, string> = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
