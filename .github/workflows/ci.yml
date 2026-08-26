@@ -1,0 +1,56 @@
+name: CI & Safe Release Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate:
+    name: Build, Typecheck & Regression Tests
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma Client
+        run: npx prisma generate
+
+      - name: Run TypeScript Type Check
+        run: npm run typecheck
+
+      - name: Run Test Suite & Critical 117-Byte Regression Gate
+        run: npx jest --no-coverage --forceExit
+        env:
+          NODE_ENV: test
+          BOT_TOKEN: "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+          DATABASE_URL: "postgresql://postgres:testpass@localhost:5432/testdb"
+          DIRECT_URL: "postgresql://postgres:testpass@localhost:5432/testdb"
+          REDIS_URL: "redis://127.0.0.1:6379"
+          ENABLE_TELEGRAM_POLLING: "false"
+
+      - name: Run Production Build
+        run: npm run build
+
+      - name: Verify Build Artifacts & Entry Points
+        run: |
+          test -f dist/bot.js || exit 1
+          test -f dist/worker.js || exit 1
+          test -f dist/server.js || exit 1
+          test -f dist/utils/downloadValidator.js || exit 1
+          echo "All production entry points and validator artifacts verified."
