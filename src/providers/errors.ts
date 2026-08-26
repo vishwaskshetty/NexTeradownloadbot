@@ -101,4 +101,41 @@ export class TeraBoxVerificationRequiredError extends TeraBoxResolverError {
   }
 }
 
+export class TeraBoxAuthRequiredError extends TeraBoxResolverError {
+  constructor(
+    message = 'TeraBox authentication is not configured. Required: TERABOX_NDUS',
+    stage = 'authentication',
+    errno = 400310,
+    requestId?: string
+  ) {
+    super(message, stage, errno, requestId, 'TERABOX_AUTH_REQUIRED');
+    this.name = 'TeraBoxAuthRequiredError';
+  }
+}
+
+export class TeraBoxAuthRejectedError extends TeraBoxResolverError {
+  constructor(
+    message = 'TeraBox rejected the configured account session (TERABOX_NDUS expired or invalid).',
+    stage = 'authentication',
+    errno = 400310,
+    requestId?: string
+  ) {
+    super(message, stage, errno, requestId, 'TERABOX_AUTH_REJECTED');
+    this.name = 'TeraBoxAuthRejectedError';
+  }
+}
+
+export class TeraBoxLinkResolutionFailedError extends TeraBoxResolverError {
+  constructor(
+    message = 'TeraBox authentication succeeded but no direct download URL was returned.',
+    stage = 'extraction',
+    errno?: number,
+    requestId?: string
+  ) {
+    super(message, stage, errno, requestId, 'TERABOX_LINK_RESOLUTION_FAILED');
+    this.name = 'TeraBoxLinkResolutionFailedError';
+  }
+}
+
+
 

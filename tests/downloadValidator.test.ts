@@ -758,4 +758,42 @@ describe('TEST 20: Empty dlink, verify_v2 & Status Message Formatting Resilience
   });
 });
 
+// ── TEST 21: TeraBox Reference Strategy Adapter & NDUS Normalization ─────────
+
+describe('TEST 21: TeraBox Reference Strategy Adapter & NDUS Normalization', () => {
+  const { normalizeNdus, teraBoxResolver } = require('../src/providers/terabox/terabox.resolver');
+  const {
+    TeraBoxAuthRequiredError,
+    TeraBoxAuthRejectedError,
+    TeraBoxLinkResolutionFailedError,
+  } = require('../src/providers/errors');
+
+  it('TC1: Normalizes raw token, ndus=token, and cookie header strings', () => {
+    expect(normalizeNdus('my_ndus_token_123')).toBe('my_ndus_token_123');
+    expect(normalizeNdus('ndus=my_ndus_token_123')).toBe('my_ndus_token_123');
+    expect(normalizeNdus('Cookie: ndus=my_ndus_token_123; other=abc')).toBe('my_ndus_token_123');
+    expect(normalizeNdus('')).toBeNull();
+    expect(normalizeNdus(undefined)).toBeNull();
+  });
+
+  it('TC2: Distinct error classes have correct names and codes', () => {
+    const authReq = new TeraBoxAuthRequiredError();
+    expect(authReq.name).toBe('TeraBoxAuthRequiredError');
+    expect(authReq.code).toBe('TERABOX_AUTH_REQUIRED');
+
+    const authRej = new TeraBoxAuthRejectedError();
+    expect(authRej.name).toBe('TeraBoxAuthRejectedError');
+    expect(authRej.code).toBe('TERABOX_AUTH_REJECTED');
+
+    const linkFail = new TeraBoxLinkResolutionFailedError();
+    expect(linkFail.name).toBe('TeraBoxLinkResolutionFailedError');
+    expect(linkFail.code).toBe('TERABOX_LINK_RESOLUTION_FAILED');
+  });
+
+  it('TC3: resolveWithReferenceStrategy method exists on resolver', () => {
+    expect(typeof teraBoxResolver.resolveWithReferenceStrategy).toBe('function');
+  });
+});
+
+
 

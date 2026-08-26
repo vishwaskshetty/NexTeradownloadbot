@@ -4,7 +4,14 @@ import { db } from '../db';
 import { jobService } from '../services/JobService';
 import { usageService } from '../services/UsageService';
 import { providerRegistry } from '../providers';
-import { ProviderError, ProviderAccessError, TeraBoxVerificationRequiredError } from '../providers/errors';
+import {
+  ProviderError,
+  ProviderAccessError,
+  TeraBoxVerificationRequiredError,
+  TeraBoxAuthRequiredError,
+  TeraBoxAuthRejectedError,
+  TeraBoxLinkResolutionFailedError,
+} from '../providers/errors';
 import { logger } from '../utils/logger';
 import {
   validateDownloadedFile,
@@ -407,8 +414,14 @@ export const initWorker = () => {
             resolveErr.name === 'InvalidUrlError' || 
             resolveErr.name === 'NotFoundError' ||
             resolveErr.name === 'TeraBoxVerificationRequiredError' ||
+            resolveErr.name === 'TeraBoxAuthRequiredError' ||
+            resolveErr.name === 'TeraBoxAuthRejectedError' ||
+            resolveErr.name === 'TeraBoxLinkResolutionFailedError' ||
             resolveErr.name === 'TeraBoxMissingContextError' ||
-            resolveErr.code === 'TERABOX_VERIFICATION_REQUIRED';
+            resolveErr.code === 'TERABOX_VERIFICATION_REQUIRED' ||
+            resolveErr.code === 'TERABOX_AUTH_REQUIRED' ||
+            resolveErr.code === 'TERABOX_AUTH_REJECTED' ||
+            resolveErr.code === 'TERABOX_LINK_RESOLUTION_FAILED';
           
           if (isDeterministic || attempt >= maxRetries) {
             throw resolveErr;
@@ -662,6 +675,21 @@ export const initWorker = () => {
           `❌ *UPLOAD FAILED*\n\n` +
           `⚠️ The file could not be delivered to Telegram.\n\n` +
           `📊 Usage was not consumed.`;
+      } else if (error instanceof TeraBoxAuthRequiredError || error.code === 'TERABOX_AUTH_REQUIRED') {
+        userMsg =
+          `⚠️ *TERABOX AUTHENTICATION REQUIRED*\n\n` +
+          `TeraBox authentication is not configured.\nRequired configuration: TERABOX_NDUS\n\n` +
+          `Your daily download limit was NOT used.`;
+      } else if (error instanceof TeraBoxAuthRejectedError || error.code === 'TERABOX_AUTH_REJECTED') {
+        userMsg =
+          `⚠️ *TERABOX AUTHENTICATION REJECTED*\n\n` +
+          `TeraBox rejected the configured account session (TERABOX_NDUS expired or invalid).\n\n` +
+          `Your daily download limit was NOT used.`;
+      } else if (error instanceof TeraBoxLinkResolutionFailedError || error.code === 'TERABOX_LINK_RESOLUTION_FAILED') {
+        userMsg =
+          `⚠️ *TERABOX RESOLUTION FAILED*\n\n` +
+          `TeraBox metadata was resolved, but no direct download URL was returned.\n\n` +
+          `Your daily download limit was NOT used.`;
       } else if (error instanceof TeraBoxVerificationRequiredError || error.name === 'TeraBoxVerificationRequiredError' || error.code === 'TERABOX_VERIFICATION_REQUIRED') {
         userMsg =
           `⚠️ *TERABOX AUTHENTICATION REQUIRED*\n\n` +

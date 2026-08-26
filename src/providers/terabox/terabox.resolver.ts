@@ -14,8 +14,26 @@ import {
   TeraBoxProviderError,
   TeraBoxDownloadUrlError,
   TeraBoxVerificationRequiredError,
+  TeraBoxAuthRequiredError,
+  TeraBoxAuthRejectedError,
+  TeraBoxLinkResolutionFailedError,
 } from '../errors';
 import { logger } from '../../utils/logger';
+
+/**
+ * Normalizes raw TERABOX_NDUS value so that both `xyz` and `ndus=xyz` or `Cookie: ndus=xyz`
+ * are correctly formatted as the clean token value.
+ */
+export function normalizeNdus(rawNdus?: string): string | null {
+  if (!rawNdus) return null;
+  const trimmed = rawNdus.trim();
+  if (!trimmed) return null;
+  const match = trimmed.match(/(?:^|;\s*|\b)ndus=([^;\s]+)/i);
+  if (match) {
+    return match[1].trim();
+  }
+  return trimmed;
+}
 
 /**
  * TypeScript Interfaces for TeraBox API responses
@@ -752,12 +770,21 @@ export class TeraBoxResolver {
         );
 
         if (Number(downloadRes.errno) === 400310 || safeMsg.includes('verify_v2') || safeMsg.includes('need verify')) {
-          throw new TeraBoxVerificationRequiredError(
-            'TeraBox download requires an authenticated account session (TERABOX_NDUS) or official API credentials (TERABOX_ACCESS_TOKEN).',
-            'verification',
-            Number(downloadRes.errno),
-            String(requestId)
-          );
+          if (config.TERABOX_NDUS) {
+            throw new TeraBoxAuthRejectedError(
+              'TeraBox rejected the configured account session (TERABOX_NDUS expired or invalid).',
+              'authentication',
+              Number(downloadRes.errno),
+              String(requestId)
+            );
+          } else {
+            throw new TeraBoxAuthRequiredError(
+              'TeraBox authentication is not configured. Required: TERABOX_NDUS',
+              'authentication',
+              Number(downloadRes.errno),
+              String(requestId)
+            );
+          }
         }
 
         throw new TeraBoxProviderError(
@@ -783,7 +810,7 @@ export class TeraBoxResolver {
             'Content-Type': 'application/x-www-form-urlencoded',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
             'Referer': 'https://www.terabox.app/',
-            ...(config.TERABOX_NDUS ? { 'Cookie': `ndus=${config.TERABOX_NDUS}` } : {})
+            ...(config.TERABOX_NDUS ? { 'Cookie': `ndus=${normalizeNdus(config.TERABOX_NDUS)}` } : {})
           },
           data: new URLSearchParams({
             product: 'share',
@@ -823,8 +850,8 @@ export class TeraBoxResolver {
 
     if (!downloadUrl) {
       logger.error(`[TeraBox] Failed to extract valid direct download URL for fs_id ${file.fs_id}`);
-      throw new TeraBoxDownloadUrlError(
-        'TeraBox metadata and authenticated share context were resolved, but the provider did not return a valid download URL.'
+      throw new TeraBoxLinkResolutionFailedError(
+        'TeraBox authentication succeeded but no direct download URL was returned.'
       );
     }
 
@@ -863,6 +890,19 @@ export class TeraBoxResolver {
    */
   async resolvePublicLink(url: string): Promise<TeraBoxResolvedFile> {
     return this.resolveSelectedFile(url);
+  }
+
+  /**
+   * Resolves direct download URL using the reference strategy adapter
+   */
+  async resolveWithReferenceStrategy(url: string, fsId?: string | number): Promise<TeraBoxDownloadResult> {
+    const resolved = await this.resolveSelectedFile(url, fsId);
+    return {
+      fileName: resolved.fileName,
+      size: resolved.fileSize,
+      downloadUrl: resolved.downloadUrl,
+      source: resolved.isUnofficial ? 'pahadi10-reference' : 'official-api',
+    };
   }
 
   /**
