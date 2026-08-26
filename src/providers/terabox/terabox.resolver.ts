@@ -88,15 +88,26 @@ export function describeProviderResponse(name: string, response: unknown): void 
     return;
   }
 
-  const obj = response as Record<string, unknown>;
+  const obj = response as Record<string, any>;
+  const dataObj = obj.data && typeof obj.data === 'object' && !Array.isArray(obj.data) ? obj.data : undefined;
 
   logger.info(
     `[TeraBox Debug] ${name}: ` +
       JSON.stringify({
         keys: Object.keys(obj),
-        errno: obj.errno,
-        errmsg: typeof obj.errmsg === 'string' ? obj.errmsg.slice(0, 300) : undefined,
-        requestId: obj.request_id ?? obj.request_id_string,
+        dataKeys: dataObj ? Object.keys(dataObj) : undefined,
+        errno: obj.errno ?? dataObj?.errno,
+        errmsg:
+          typeof obj.errmsg === 'string'
+            ? obj.errmsg.slice(0, 300)
+            : typeof dataObj?.errmsg === 'string'
+            ? dataObj.errmsg.slice(0, 300)
+            : undefined,
+        requestId:
+          obj.request_id ??
+          obj.request_id_string ??
+          dataObj?.request_id ??
+          dataObj?.request_id_string,
       })
   );
 }
