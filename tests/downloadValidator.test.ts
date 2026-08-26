@@ -517,6 +517,63 @@ describe('TEST 15: Security Hardening — Path Traversal Sanitization', () => {
   });
 });
 
+// ── TEST 17: TeraBox Download URL Extraction & Normalization ─────────────────
+
+describe('TEST 17: TeraBox Download URL Extraction & Normalization', () => {
+  const { extractTeraBoxDownloadUrl } = require('../src/providers/terabox/terabox.resolver');
+
+  it('TC1: Direct string candidate', () => {
+    expect(extractTeraBoxDownloadUrl({ dlink: 'https://example.com/file' })).toBe('https://example.com/file');
+  });
+
+  it('TC2: Nested response candidate', () => {
+    expect(extractTeraBoxDownloadUrl({ data: { dlink: 'https://example.com/file' } })).toBe('https://example.com/file');
+  });
+
+  it('TC3: Array response candidate', () => {
+    expect(extractTeraBoxDownloadUrl({ dlink: ['invalid', 'https://example.com/file'] })).toBe('https://example.com/file');
+  });
+
+  it('TC4: Object response candidate', () => {
+    expect(extractTeraBoxDownloadUrl({ dlink: { url: 'https://example.com/file' } })).toBe('https://example.com/file');
+  });
+
+  it('TC5: Escaped URL (slashes & unicode)', () => {
+    expect(extractTeraBoxDownloadUrl('https:\\/\\/example.com\\/file?x=1\\u0026y=2')).toBe('https://example.com/file?x=1&y=2');
+  });
+
+  it('TC6: HTML escaped URL', () => {
+    expect(extractTeraBoxDownloadUrl('https://example.com/file?x=1&amp;y=2')).toBe('https://example.com/file?x=1&y=2');
+  });
+
+  it('TC7: Encoded URL normalization', () => {
+    expect(extractTeraBoxDownloadUrl('https%3A%2F%2Fexample.com%2Ffile%3Ftest%3D1')).toBe('https://example.com/file?test=1');
+  });
+
+  it('TC8: Invalid protocol rejection (ftp://)', () => {
+    expect(extractTeraBoxDownloadUrl('ftp://example.com/file')).toBeNull();
+  });
+
+  it('TC9: Invalid object without url fields', () => {
+    expect(extractTeraBoxDownloadUrl({ foo: 'bar' })).toBeNull();
+  });
+
+  it('TC10: Long signed CDN URL acceptance', () => {
+    const longSigned = 'https://d.terabox.app/file/123?sign=abcdef1234567890&expires=8h&dp-logid=9999999999';
+    expect(extractTeraBoxDownloadUrl(longSigned)).toBe(longSigned);
+  });
+
+  it('TC11: URL with no file extension acceptance', () => {
+    const noExt = 'https://cdn.terabox.app/download/v1/stream?fid=123456';
+    expect(extractTeraBoxDownloadUrl(noExt)).toBe(noExt);
+  });
+
+  it('TC12: URL with redirecting CDN hostname acceptance', () => {
+    const redirectCdn = 'https://data.terabox.app/thumbnail/123?fid=4402084097765-250528-167926395530178';
+    expect(extractTeraBoxDownloadUrl(redirectCdn)).toBe(redirectCdn);
+  });
+});
+
 // ── TEST 16: Security Hardening — Admin Authorization Check ──────────────────
 
 describe('TEST 16: Security Hardening — Admin Authorization', () => {
@@ -532,5 +589,3 @@ describe('TEST 16: Security Hardening — Admin Authorization', () => {
     expect(isAdmin(111111111)).toBe(false); // Unauthorized user
   });
 });
-
-
