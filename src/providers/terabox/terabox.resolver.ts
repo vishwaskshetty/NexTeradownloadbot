@@ -920,7 +920,16 @@ export class TeraBoxResolver {
       .map(c => c.trim().split('=')[0])
       .filter(Boolean);
 
-    logger.info(`[TeraBox Auth] NDUS attached: ${normalizedNdusVal ? 'YES' : 'NO'}`);
+    const isNdusConfigured = Boolean(config.TERABOX_NDUS && config.TERABOX_NDUS.trim().length > 0);
+    const isNdusNormalized = Boolean(normalizedNdusVal && normalizedNdusVal.length > 0);
+    const isCookieContainsNdus = Boolean(combinedCookies && combinedCookies.includes('ndus='));
+    const isSessionCookiesPresent = Boolean(activeCookies && activeCookies.length > 0);
+
+    logger.info(`[TeraBox Auth] NDUS configured: ${isNdusConfigured ? 'YES' : 'NO'}`);
+    logger.info(`[TeraBox Auth] NDUS normalized: ${isNdusNormalized ? 'YES' : 'NO'}`);
+    logger.info(`[TeraBox Auth] NDUS attached to request: ${isCookieContainsNdus ? 'YES' : 'NO'}`);
+    logger.info(`[TeraBox Auth] Cookie header contains ndus: ${isCookieContainsNdus ? 'YES' : 'NO'}`);
+    logger.info(`[TeraBox Auth] Session cookies present: ${isSessionCookiesPresent ? 'YES' : 'NO'}`);
     logger.info(`[TeraBox Auth] Cookie names: [${cookieNames.join(', ')}]`);
     logger.info(`[TeraBox Auth] NDUS header format: ndus=<masked> (length=${normalizedNdusVal ? normalizedNdusVal.length : 0})`);
     logger.info(`[TeraBox Auth] jsToken attached: ${activeJsToken ? 'YES' : 'NO'}`);
@@ -959,6 +968,7 @@ export class TeraBoxResolver {
     if (downloadRes && downloadRes.errno !== undefined && Number(downloadRes.errno) !== 0) {
       const safeMsg = typeof downloadRes.errmsg === 'string' ? downloadRes.errmsg : 'parameter error';
       const requestId = downloadRes.request_id ?? downloadRes.request_id_string ?? '';
+      logger.warn(`[TeraBox Auth] Reference API returned error: errno=${downloadRes.errno}, errmsg="${safeMsg}", request_id=${requestId}`);
 
       if (Number(downloadRes.errno) === 400310 || safeMsg.includes('verify_v2') || safeMsg.includes('need verify')) {
         if (normalizedNdusVal) {
