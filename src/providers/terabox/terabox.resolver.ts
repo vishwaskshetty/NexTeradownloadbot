@@ -295,7 +295,8 @@ export class TeraBoxResolver {
     };
 
     try {
-      await redis.setex(cacheKey, 600, JSON.stringify(metadata));
+      // TTL = 300s: dlinks from TeraBox expire quickly; don't cache stale URLs for too long
+      await redis.setex(cacheKey, 300, JSON.stringify(metadata));
     } catch {}
 
     return metadata;
@@ -435,3 +436,17 @@ export class TeraBoxResolver {
 }
 
 export const teraBoxResolver = new TeraBoxResolver();
+
+/**
+ * Clears the Redis share-metadata cache for a given share code.
+ * Call this before each retry so a fresh dlink is fetched from TeraBox.
+ */
+export async function clearTeraBoxShareCache(shareCode: string): Promise<void> {
+  try {
+    const cacheKey = `terabox:meta_list:${shareCode}`;
+    await redis.del(cacheKey);
+    logger.info(`[TeraBox] Share metadata cache cleared for ${shareCode}`);
+  } catch (e: any) {
+    logger.warn(`[TeraBox] Could not clear share metadata cache: ${e.message}`);
+  }
+}

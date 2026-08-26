@@ -6,6 +6,13 @@ import { usageService } from '../services/UsageService';
 import { providerRegistry } from '../providers';
 import { ProviderError, ProviderAccessError } from '../providers/errors';
 import { logger } from '../utils/logger';
+import {
+  validateDownloadedFile,
+  validateHttpResponseHeaders,
+  formatBytes,
+  ValidationResult,
+} from '../utils/downloadValidator';
+import { clearTeraBoxShareCache, extractShareCode } from '../providers/terabox/terabox.resolver';
 import { bot } from '../bot';
 import { config } from '../config';
 import axios from 'axios';
@@ -15,120 +22,6 @@ import path from 'path';
 import crypto from 'crypto';
 
 let downloadWorker: Worker | null = null;
-
-function formatBytes(bytes: number | bigint): string {
-  const num = Number(bytes);
-  if (!num || num === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(num) / Math.log(k));
-  return parseFloat((num / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
-
-export interface ValidationResult {
-  valid: boolean;
-  actualSize: number;
-  reason?: string;
-}
-
-/**
- * Validates downloaded local file integrity & magic headers:
- * Verifies file exists, actual size is >= 1 KB for media/archive files,
- * content is not HTML/JSON error page, and magic signatures match where applicable.
- */
-export const validateDownloadedFile = async (
-  filePath: string,
-  expectedSize?: number
-): Promise<ValidationResult> => {
-  if (!fs.existsSync(filePath)) {
-    return { valid: false, actualSize: 0, reason: 'Temporary file does not exist' };
-  }
-
-  const stat = fs.statSync(filePath);
-  const actualSize = stat.size;
-  const ext = path.extname(filePath).toLowerCase();
-  const isTextFileExpected = ['.txt', '.json', '.html', '.htm', '.xml', '.csv', '.log'].includes(ext);
-
-  // 1. Minimum size guard (e.g. 117 B response is rejected)
-  if (actualSize < 1024 && !isTextFileExpected) {
-    return {
-      valid: false,
-      actualSize,
-      reason: `File size too small (${actualSize} B). Minimum required for media/archive files is 1024 B.`
-    };
-  }
-
-  // 2. Read initial 512 bytes to inspect content & header signatures
-  const fd = fs.openSync(filePath, 'r');
-  const buffer = Buffer.alloc(512);
-  const bytesRead = fs.readSync(fd, buffer, 0, 512, 0);
-  fs.closeSync(fd);
-
-  const headerStr = buffer.toString('utf8', 0, bytesRead).trim();
-
-  // Reject HTML/JSON error payloads
-  if (!isTextFileExpected) {
-    if (
-      headerStr.startsWith('{"errno"') ||
-      headerStr.startsWith('{"error"') ||
-      headerStr.startsWith('{"status"') ||
-      headerStr.startsWith('{"msg"') ||
-      headerStr.toLowerCase().startsWith('<!doctype') ||
-      headerStr.toLowerCase().startsWith('<html') ||
-      headerStr.toLowerCase().startsWith('<body') ||
-      headerStr.includes('Access Denied') ||
-      headerStr.includes('Unauthorized')
-    ) {
-      return {
-        valid: false,
-        actualSize,
-        reason: `Downloaded content is an HTML/JSON error page rather than valid file bytes (${actualSize} B).`
-      };
-    }
-  }
-
-  // 3. File magic header signature checks where applicable
-  if (ext === '.mp4') {
-    if (buffer.indexOf('ftyp') === -1 && actualSize > 1024 * 1024) {
-      return { valid: false, actualSize, reason: 'File extension is .mp4 but missing valid ftyp header.' };
-    }
-  } else if (ext === '.mkv' || ext === '.webm') {
-    // EBML header 0x1A45DFA3
-    if (buffer[0] !== 0x1A || buffer[1] !== 0x45 || buffer[2] !== 0xDF || buffer[3] !== 0xA3) {
-      if (actualSize > 1024 * 1024) {
-        return { valid: false, actualSize, reason: 'File extension is MKV/WebM but missing valid EBML header.' };
-      }
-    }
-  } else if (ext === '.zip') {
-    // PK\x03\x04
-    if (buffer[0] !== 0x50 || buffer[1] !== 0x4B) {
-      return { valid: false, actualSize, reason: 'File extension is .zip but missing PK header.' };
-    }
-  } else if (ext === '.rar') {
-    // Rar!\x1A\x07
-    if (buffer[0] !== 0x52 || buffer[1] !== 0x61 || buffer[2] !== 0x72 || buffer[3] !== 0x21) {
-      return { valid: false, actualSize, reason: 'File extension is .rar but missing Rar! header.' };
-    }
-  } else if (ext === '.7z') {
-    // 7z\xBC\xAF\x27\x1C
-    if (buffer[0] !== 0x37 || buffer[1] !== 0x7A || buffer[2] !== 0xBC || buffer[3] !== 0xAF) {
-      return { valid: false, actualSize, reason: 'File extension is .7z but missing 7z header.' };
-    }
-  }
-
-  // 4. Expected vs Actual size match (if expected size > 10 MB and actual size < 50% expected)
-  if (expectedSize && expectedSize > 10 * 1024 * 1024) {
-    if (actualSize < 0.5 * expectedSize) {
-      return {
-        valid: false,
-        actualSize,
-        reason: `Downloaded file size (${formatBytes(actualSize)}) is dramatically smaller than provider metadata (${formatBytes(expectedSize)}).`
-      };
-    }
-  }
-
-  return { valid: true, actualSize };
-};
 
 /**
  * Smart media detection helper:
@@ -194,16 +87,25 @@ const sendMediaToTelegram = async (
 };
 
 /**
- * Downloads direct URL to disk via stream with HTTP response header validation & progress logging.
- * Streams first to a temporary .part file, then renames to final destination file.
+ * Downloads a direct URL to disk via streaming with pre-stream header validation.
+ *
+ * Validates BEFORE streaming:
+ *   - HTTP status must be 2xx
+ *   - Content-Type must not be text/html, application/json, etc. for media files
+ *   - Content-Length must not be suspiciously small vs expectedSize
+ *
+ * Streams to a .part file, renames to final path only on success.
  */
 const downloadFileStream = async (
   url: string,
   destPath: string,
-  headers?: Record<string, string>
+  headers?: Record<string, string>,
+  expectedSize?: number,
+  filename?: string
 ): Promise<number> => {
   const partPath = `${destPath}.part`;
   const parsedUrl = new URL(url);
+  // Log only hostname — never log signed URLs, tokens, or cookies
   logger.info(`[Download] Requested URL hostname: ${parsedUrl.hostname}`);
 
   const requestHeaders: Record<string, string> = {
@@ -221,37 +123,42 @@ const downloadFileStream = async (
     url,
     method: 'GET',
     responseType: 'stream',
-    timeout: 60000,
+    timeout: 120000, // 2 minutes for large files
     headers: requestHeaders,
-    maxRedirects: 5,
+    maxRedirects: 10,
   });
 
-  const contentType = String(response.headers['content-type'] || '').toLowerCase();
+  const contentType = String(response.headers['content-type'] || '');
   const contentLength = Number(response.headers['content-length'] || 0);
+  const finalUrlHost = response.request?.res?.responseUrl
+    ? new URL(response.request.res.responseUrl).hostname
+    : parsedUrl.hostname;
 
-  // Determine final redirected URL hostname safely
-  const finalUrlHost = response.request?.res?.responseUrl ? new URL(response.request.res.responseUrl).hostname : parsedUrl.hostname;
-
+  // ── Structured pre-stream diagnostic logging ───────────────────────────
   logger.info(`[Download] Final URL hostname: ${finalUrlHost}`);
-  logger.info(
-    `[Download] HTTP status: ${response.status} | ` +
-    `Content-Type=${contentType || 'unknown'} | ` +
-    `Content-Length=${contentLength || 'unknown'}`
-  );
-
-  const ext = path.extname(destPath).toLowerCase();
-  const isTextFileExpected = ['.txt', '.json', '.html', '.htm', '.xml', '.csv', '.log'].includes(ext);
-
-  if (!isTextFileExpected && (contentType.includes('application/json') || contentType.includes('text/html'))) {
-    response.data.destroy?.();
-    throw new Error(`Invalid download response: received ${contentType} instead of media bytes`);
+  logger.info(`[Download] HTTP status: ${response.status}`);
+  logger.info(`[Download] Content-Type: ${contentType || '(none)'}`);
+  logger.info(`[Download] Content-Length: ${contentLength > 0 ? formatBytes(contentLength) : '(unknown)'}`);
+  if (expectedSize) {
+    logger.info(`[Download] Expected size: ${formatBytes(expectedSize)}`);
   }
 
-  if (contentLength > 0 && contentLength < 1024 && !isTextFileExpected) {
+  // ── Pre-stream header validation (blocks before any bytes are written) ─
+  const headerCheck = validateHttpResponseHeaders({
+    status: response.status,
+    contentType,
+    contentLength,
+    expectedSize,
+    filename,
+  });
+
+  if (!headerCheck.valid) {
     response.data.destroy?.();
-    throw new Error(`Download response is suspiciously small: ${contentLength} bytes`);
+    logger.error(`[Download] Pre-stream validation FAILED: ${headerCheck.reason}`);
+    throw new Error(`Download rejected before streaming: ${headerCheck.reason}`);
   }
 
+  // ── Stream to .part file ───────────────────────────────────────────────
   const writer = fs.createWriteStream(partPath);
   let downloadedBytes = 0;
   let lastLoggedMb = 0;
@@ -269,7 +176,7 @@ const downloadFileStream = async (
 
   return new Promise((resolve, reject) => {
     writer.on('finish', () => {
-      logger.info(`[Download] Final file size: ${formatBytes(downloadedBytes)}`);
+      logger.info(`[Download] Stream completed. Total received: ${formatBytes(downloadedBytes)}`);
       try {
         if (fs.existsSync(destPath)) {
           fs.unlinkSync(destPath);
@@ -346,21 +253,51 @@ export const initWorker = () => {
         `⚡ Extracting file information...`
       );
 
-      // Check PostgreSQL StoredFile Cache with STRICT 1024-byte validation
+      logger.info(`[Job] ${jobId} — provider: ${adapter.name} | url: ${url.substring(0, 60)}`);
+
+      // ── Check PostgreSQL StoredFile Cache with strict size validation ──────
       const cacheKeyStr = fsId ? `${url}#fs_${fsId}` : url;
       const urlHash = crypto.createHash('sha256').update(cacheKeyStr).digest('hex');
       const cachedFile = await db.storedFile.findUnique({ where: { urlHash } });
       const cachedFileSize = Number(cachedFile?.fileSize || 0);
 
       if (cachedFile) {
+        // Resolve metadata first so we can validate the cached size
+        let metaForCache: any = null;
+        try {
+          const adapterInstance = adapter as any;
+          metaForCache = typeof adapterInstance.resolveSelectedFile === 'function'
+            ? await adapterInstance.resolveSelectedFile(url, fsId)
+            : await adapter.resolve(url);
+        } catch (e: any) {
+          logger.warn(`[Cache] Could not resolve metadata for cache validation: ${e.message}`);
+        }
+        const expectedForCache = Number(metaForCache?.fileSize || 0);
+
+        // Cache is valid only if:
+        //  - not expired
+        //  - cached size >= 1024 bytes
+        //  - telegram file_id is present
+        //  - if we know expected size: cached size must be within ±10% of expected
+        const CACHE_SIZE_OK =
+          cachedFileSize >= 1024 &&
+          (
+            !expectedForCache ||
+            expectedForCache === 0 ||
+            (
+              cachedFileSize >= expectedForCache * 0.90 &&
+              cachedFileSize <= expectedForCache * 1.10
+            )
+          );
+
         if (
           cachedFile.expiresAt > new Date() &&
-          cachedFileSize >= 1024 &&
+          CACHE_SIZE_OK &&
           cachedFile.telegramFileId &&
           cachedFile.telegramFileId.trim() !== ''
         ) {
-          logger.info(`[Cache] Cache hit | Size=${formatBytes(cachedFileSize)}`);
-          
+          logger.info(`[Cache] Cache hit | Cached=${formatBytes(cachedFileSize)} | Expected=${expectedForCache ? formatBytes(expectedForCache) : '?'}`);
+
           await updateStatusMessage(
             `📄 *File found*\n` +
             `📁 \`${cachedFile.fileName}\`\n` +
@@ -395,20 +332,28 @@ export const initWorker = () => {
             `📥 Remaining: ${remaining}`;
 
           await updateStatusMessage(successMsg);
+          logger.info(`[Job] ${jobId} completed via cache.`);
+          logger.info(`[Usage] Daily usage incremented for user ${user.id}.`);
           return; // Job is fully done
         } else {
+          // Cache entry is invalid (expired, wrong size, or missing file_id) — delete it
           logger.warn(
-            `[Cache] Invalid cached file removed | ` +
-            `Size=${cachedFileSize} | ` +
-            `HasTelegramId=${Boolean(cachedFile.telegramFileId)}`
+            `[Cache] Invalidating cache entry | ` +
+            `CachedSize=${formatBytes(cachedFileSize)} | ` +
+            `ExpectedSize=${expectedForCache ? formatBytes(expectedForCache) : '?'} | ` +
+            `SizeOK=${CACHE_SIZE_OK} | ` +
+            `Expired=${cachedFile.expiresAt <= new Date()} | ` +
+            `HasFileId=${Boolean(cachedFile.telegramFileId)}`
           );
           await db.storedFile.delete({ where: { id: cachedFile.id } }).catch(() => {});
         }
       } else {
-        logger.info(`[Cache] Cache miss`);
+        logger.info(`[Cache] Cache miss — proceeding with fresh download.`);
       }
 
-      // Retry Loop with Fresh URL Resolution & Strict File Validation
+      // ── Retry Loop: Fresh URL Resolution + Strict File Validation ──────────
+      // CRITICAL: Before each attempt, bust the Redis share metadata cache so
+      // TeraBox generates a completely fresh dlink (pre-signed URLs expire fast).
       let resolvedFile: any = null;
       let validation: ValidationResult | null = null;
       let validated = false;
@@ -419,20 +364,40 @@ export const initWorker = () => {
         try { fs.mkdirSync(tmpDir, { recursive: true }); } catch (e) {}
       }
 
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        logger.info(`[Download] Attempt ${attempt}/${maxRetries} starting...`);
+      // Extract share code for cache busting (TeraBox-specific)
+      const shareCode = extractShareCode(url);
 
-        // Delete previous temp file before retry
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        logger.info(`[Download] Attempt ${attempt}/${maxRetries}`);
+
+        // Delete invalid temp file from previous failed attempt
         if (tempFilePath && fs.existsSync(tempFilePath)) {
           try { fs.unlinkSync(tempFilePath); } catch (e) {}
           tempFilePath = null;
+          logger.info(`[Download] Deleted invalid temporary file from attempt ${attempt - 1}`);
         }
 
-        // IMPORTANT: Resolve a COMPLETELY FRESH TeraBox direct URL on every retry
+        // CRITICAL: Bust the Redis share metadata cache before every attempt.
+        // This forces resolveSelectedFile() to request a fresh dlink from TeraBox
+        // instead of returning the expired URL from the 10-minute cache.
+        if (shareCode) {
+          await clearTeraBoxShareCache(shareCode);
+        }
+
+        // Resolve a completely fresh direct download URL from TeraBox
         const adapterInstance = adapter as any;
-        resolvedFile = typeof adapterInstance.resolveSelectedFile === 'function'
-          ? await adapterInstance.resolveSelectedFile(url, fsId)
-          : await adapter.resolve(url);
+        try {
+          resolvedFile = typeof adapterInstance.resolveSelectedFile === 'function'
+            ? await adapterInstance.resolveSelectedFile(url, fsId)
+            : await adapter.resolve(url);
+        } catch (resolveErr: any) {
+          logger.error(`[Download] Attempt ${attempt}: Failed to resolve URL — ${resolveErr.message}`);
+          if (attempt < maxRetries) {
+            await new Promise(r => setTimeout(r, 3000 * attempt));
+            continue;
+          }
+          throw resolveErr;
+        }
 
         const downloadUrl = resolvedFile.downloadUrl;
         if (typeof downloadUrl !== 'string' || !/^https?:\/\//i.test(downloadUrl)) {
@@ -440,7 +405,9 @@ export const initWorker = () => {
         }
 
         const filename = resolvedFile.fileName || 'downloaded_file';
-        const expectedSize = resolvedFile.fileSize;
+        const expectedSize = Number(resolvedFile.fileSize || 0);
+
+        logger.info(`[TeraBox] Share resolved | File: "${filename}" | Expected size: ${formatBytes(expectedSize)}`);
 
         // Update single status message: File found & Downloading
         await updateStatusMessage(
@@ -453,72 +420,104 @@ export const initWorker = () => {
         const safeName = filename.replace(/[^a-zA-Z0-9_.-]/g, '_');
         tempFilePath = path.join(tmpDir, `${jobId}_${attempt}_${safeName}`);
 
+        // Attempt download — downloadFileStream validates headers BEFORE streaming
         try {
-          await downloadFileStream(downloadUrl, tempFilePath, resolvedFile.headers);
+          await downloadFileStream(downloadUrl, tempFilePath, resolvedFile.headers, expectedSize, filename);
         } catch (dlErr: any) {
-          logger.warn(`[Download] Stream attempt ${attempt} failed: ${dlErr.message}`);
+          logger.warn(`[Download] Attempt ${attempt} stream failed: ${dlErr.message}`);
+          // Clean up the (possibly partial) file
+          if (tempFilePath && fs.existsSync(tempFilePath)) {
+            try { fs.unlinkSync(tempFilePath); } catch (e) {}
+            tempFilePath = null;
+          }
+          const partPath = `${tempFilePath}.part`;
+          if (partPath && fs.existsSync(partPath)) {
+            try { fs.unlinkSync(partPath); } catch (e) {}
+          }
+          if (attempt < maxRetries) {
+            await new Promise(r => setTimeout(r, 3000 * attempt));
+            continue;
+          }
+          // All retries exhausted via stream failure
+          throw dlErr;
         }
 
-        // Strict File Validation Check
+        // ── Post-stream file validation ──────────────────────────────────────
         if (tempFilePath && fs.existsSync(tempFilePath)) {
-          validation = await validateDownloadedFile(tempFilePath, expectedSize);
+          validation = await validateDownloadedFile(tempFilePath, expectedSize, filename);
 
           logger.info(
-            `[Validation] Expected=${formatBytes(expectedSize)} | ` +
+            `[Validation] Attempt ${attempt} | ` +
+            `Expected=${formatBytes(expectedSize)} | ` +
             `Actual=${formatBytes(validation.actualSize)} | ` +
             `Valid=${validation.valid}`
           );
 
           if (validation.valid) {
+            logger.info(`[Validation] Size validation: PASS | Content validation: PASS`);
             validated = true;
             validatedActualSize = validation.actualSize;
-            break; // Valid file! Exit loop
+            break; // Valid file — exit retry loop
           }
 
           logger.error(
-            `[Validation] Integrity FAILED | ` +
-            `Actual=${formatBytes(validation.actualSize)} | ` +
-            `Reason=${validation.reason || 'unknown'}`
+            `[Validation] FAILED on attempt ${attempt} | ` +
+            `Reason: ${validation.reason || 'unknown'}`
           );
+        } else {
+          logger.error(`[Download] Attempt ${attempt}: Temp file missing after stream completed.`);
+          validation = { valid: false, actualSize: 0, reason: 'Temp file missing after download.' };
         }
 
+        // Clean up invalid file before retrying
         if (tempFilePath && fs.existsSync(tempFilePath)) {
           try { fs.unlinkSync(tempFilePath); } catch (e) {}
           tempFilePath = null;
         }
 
         if (attempt < maxRetries) {
-          await new Promise(r => setTimeout(r, 2000 * attempt));
+          logger.info(`[Download] Resolving fresh TeraBox URL for attempt ${attempt + 1}...`);
+          await new Promise(r => setTimeout(r, 3000 * attempt));
         }
       }
 
-      // AFTER THE LOOP HARD FAILURE GATE
+      // ── HARD FAILURE GATE (ABSOLUTE INVARIANT) ──────────────────────────
+      // NO FILE MAY BE UPLOADED TO TELEGRAM UNTIL validation passes.
       if (!validated || !validation?.valid || !tempFilePath || !fs.existsSync(tempFilePath)) {
-        logger.error(`[Download] All ${maxRetries} download attempts failed validation.`);
+        const lastActualSize = validation?.actualSize ?? 0;
+        const lastExpectedSize = resolvedFile ? Number(resolvedFile.fileSize || 0) : 0;
+        const failReason = validation?.reason || 'Download failed validation after all retry attempts.';
 
+        logger.error(`[Job] FAILED — all ${maxRetries} attempts failed validation.`);
+        logger.error(`[Download] Expected: ${formatBytes(lastExpectedSize)}`);
+        logger.error(`[Download] Last downloaded size: ${formatBytes(lastActualSize)}`);
+        logger.error(`[Validation] Reason: ${failReason}`);
+        logger.error(`[Validation] Telegram upload was BLOCKED.`);
+        logger.error(`[Cache] Cache store BLOCKED.`);
+        logger.error(`[Usage] Daily usage NOT incremented.`);
+
+        // Clean up any remaining temp file
         if (tempFilePath && fs.existsSync(tempFilePath)) {
           try { fs.unlinkSync(tempFilePath); } catch (e) {}
         }
 
         await jobService.updateJobStatus(jobId, 'FAILED');
-        throw new Error(validation?.reason || 'TeraBox download failed validation after all retry attempts.');
+
+        const sizeDesc = lastExpectedSize > 0
+          ? `Expected: ${formatBytes(lastExpectedSize)}\nLast downloaded size: ${formatBytes(lastActualSize)}`
+          : `Last downloaded size: ${formatBytes(lastActualSize)}`;
+
+        throw new Error(
+          `Download failed after ${maxRetries} attempts.\n\n${sizeDesc}\n\nReason: Source server returned incomplete or invalid content. Telegram upload was blocked.`
+        );
       }
 
       const filename = resolvedFile.fileName || 'downloaded_file';
 
-      // AUTHORITATIVE FILESYSTEM SIZE CHECK
+      // AUTHORITATIVE FILESYSTEM SIZE CHECK (final double-check after validation passed)
       const finalStats = fs.statSync(tempFilePath);
       const finalActualSize = finalStats.size;
-
-      logger.info(`[Download] Final file size: ${formatBytes(finalActualSize)}`);
-
-      const isTextFileExpected = ['.txt', '.json', '.html', '.htm', '.xml', '.csv', '.log'].includes(path.extname(filename).toLowerCase());
-      if (finalActualSize < 1024 && !isTextFileExpected) {
-        if (fs.existsSync(tempFilePath)) {
-          try { fs.unlinkSync(tempFilePath); } catch (e) {}
-        }
-        throw new Error(`Downloaded file is too small (${finalActualSize} bytes). Refusing Telegram upload.`);
-      }
+      logger.info(`[Download] Actual file size (fs.stat): ${formatBytes(finalActualSize)}`);
 
       // Status: PROCESSING -> FILE_READY
       await jobService.updateJobStatus(jobId, 'FILE_READY');
@@ -535,7 +534,7 @@ export const initWorker = () => {
       // Status: FILE_READY -> SENDING
       await jobService.updateJobStatus(jobId, 'SENDING');
 
-      logger.info(`[Telegram] Upload started only after validation passed (${formatBytes(finalActualSize)})`);
+      logger.info(`[Telegram] Uploading validated file (${formatBytes(finalActualSize)}) — validation passed, upload authorized.`);
 
       // Upload file to Telegram storage channel cache if configured
       if (config.STORAGE_CHANNEL_ID) {
@@ -553,8 +552,8 @@ export const initWorker = () => {
             throw new Error('Telegram upload completed without a valid file_id.');
           }
 
-          logger.info(`[Telegram] Storage upload successful. File ID: ${telegramFileId.substring(0, 10)}...`);
-          logger.info(`[Telegram] Valid file_id received: ${telegramFileId.substring(0, 10)}...`);
+          logger.info(`[Telegram] Upload successful. File ID: ${telegramFileId.substring(0, 10)}...`);
+          logger.info(`[Telegram] Returned file size validated: ${formatBytes(finalActualSize)}`);
 
           // Send to user using cached telegramFileId and smart media helper
           sentToUser = await sendMediaToTelegram(
@@ -591,6 +590,8 @@ export const initWorker = () => {
               status: 'ACTIVE'
             }
           });
+
+          logger.info(`[Cache] Valid Telegram file_id stored | fileName=${filename} | size=${formatBytes(finalActualSize)}`);
         } catch (storageErr: any) {
           logger.warn(`Storage channel caching failed: ${storageErr.message}. Falling back to direct user upload.`);
         }
@@ -611,10 +612,12 @@ export const initWorker = () => {
 
       // ATOMIC COMPLETION: Increments daily usage ONLY AFTER successful file delivery to user
       await jobService.completeJob(jobId, BigInt(finalActualSize));
-      logger.info(`[Usage] Download completed and counted for user ${user.id}.`);
 
       const updatedUsage = await usageService.getUsage(user.id);
       const remaining = Math.max(0, dailyLimit - updatedUsage.dailyRequests);
+
+      logger.info(`[Job] ${jobId} completed successfully.`);
+      logger.info(`[Usage] Daily usage incremented for user ${user.id} — ${updatedUsage.dailyRequests}/${dailyLimit}.`);
 
       // Final edit to the same single status message: Download Complete
       const finalSuccessMsg =
