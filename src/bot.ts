@@ -22,12 +22,14 @@ let isBotRunning = false;
 let workersInitialized = false;
 let pollingLockRenewalTimer: NodeJS.Timeout | null = null;
 
+import { pollingManager } from './bot/pollingManager';
+
 // Global Error Handler & 409 Conflict Guard
-bot.catch((err: unknown, ctx) => {
+bot.catch(async (err: unknown, ctx) => {
   const error = err as any;
   if (error?.response?.error_code === 409 || error?.message?.includes('409') || error?.message?.includes('Conflict')) {
-    logger.warn(`⚠️ [Telegram 409 Conflict] Another bot instance is currently running with the same BOT_TOKEN on PID ${process.pid} (${os.hostname()}). Polling stopped on this process.`);
-    isBotRunning = false;
+    logger.warn(`⚠️ [Telegram 409 Conflict] Conflict detected on PID ${process.pid} (${os.hostname()}). Handling via PollingManager.`);
+    await pollingManager.handleConflict();
     return;
   }
   handleError(err as Error, ctx);
@@ -155,7 +157,6 @@ export const start = async () => {
         const { redis } = require('./redis');
         const maskedRedisUrl = (config.REDIS_URL || '').replace(/:([^:@]+)@/, ':***@');
         logger.info(`[Redis] Connecting to: ${maskedRedisUrl}`);
-        // Apply a 15-second timeout to avoid hanging indefinitely
         await Promise.race([
           redis.ping(),
           new Promise((_, reject) =>
@@ -192,85 +193,9 @@ export const start = async () => {
        logger.info('Workers initialized successfully\n');
     }
 
-    // 5. Test Telegram Bot Connection & Acquire Distributed Polling Lock
+    // 5. Start Distributed Telegram Polling Manager
     if (config.NODE_ENV !== 'test' && config.ENABLE_TELEGRAM_POLLING) {
-      if (isPollingLaunched) {
-        logger.warn(`⚠️ [Telegram Polling Guard] Polling already launched on PID ${process.pid}. Skipping duplicate startup.`);
-        return;
-      }
-
-      // Redis Distributed Lock Guard (Prevents duplicate polling across multiple replicas / containers)
-      try {
-        const { redis } = require('./redis');
-        const lockAcquired = await redis.set('lock:telegram_polling', PROCESS_INSTANCE_ID, 'PX', 30000, 'NX');
-        if (!lockAcquired) {
-          const currentHolder = await redis.get('lock:telegram_polling');
-          logger.warn(
-            `⚠️ [Telegram Polling Guard] Active polling lock is currently held by replica [${currentHolder}]. ` +
-            `This instance (PID: ${process.pid}, Host: ${os.hostname()}) will operate in background worker/HTTP mode without duplicate polling.`
-          );
-          return;
-        }
-
-        // Lock renewal timer (renew every 10 seconds while process is healthy)
-        pollingLockRenewalTimer = setInterval(async () => {
-          try {
-            const renewScript = `
-              if redis.call("get", KEYS[1]) == ARGV[1] then
-                return redis.call("pexpire", KEYS[1], ARGV[2])
-              else
-                return 0
-              end
-            `;
-            await redis.eval(renewScript, 1, 'lock:telegram_polling', PROCESS_INSTANCE_ID, 30000);
-          } catch (renewErr) {
-            // Ignore temporary redis renewal glitches
-          }
-        }, 10000);
-        pollingLockRenewalTimer.unref();
-      } catch (lockErr: any) {
-        logger.warn(`[Telegram Polling Guard] Could not check Redis polling lock: ${lockErr.message}`);
-      }
-
-      logger.info(`[Bot ${PROCESS_INSTANCE_ID}] Testing Telegram Bot Connection...`);
-      try {
-        const me = await bot.telegram.getMe();
-        logger.info(`[Bot] Telegram token configured: YES`);
-        logger.info(`[Bot] Telegram initialization: SUCCESS (@${me.username})`);
-      } catch (e: any) {
-        if (e?.response?.error_code === 409 || e?.message?.includes('409') || e?.message?.includes('Conflict')) {
-          logger.warn(`⚠️ [Telegram 409 Conflict] Another bot instance is currently active with the same BOT_TOKEN on PID ${process.pid} (${os.hostname()}).`);
-          return;
-        }
-        logger.error(`[Bot] Telegram initialization FAILED: ${e.message}`);
-        throw e;
-      }
-
-      logger.info('Removing Telegram webhook...');
-      try {
-        await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-        logger.info('Telegram webhook removed successfully\n');
-      } catch (e) {
-        logger.error('Failed to remove Telegram webhook.');
-      }
-
-      // 6. Launch Telegram long polling with singleton process flag
-      isPollingLaunched = true;
-      logger.info(`🚀 [Bot ${PROCESS_INSTANCE_ID}] Starting NexTeraDownloadBot Telegram polling...`);
-      
-      bot.launch({ dropPendingUpdates: true })
-        .catch((err: any) => {
-          isBotRunning = false;
-          if (err?.response?.error_code === 409 || err?.message?.includes('409') || err?.message?.includes('Conflict')) {
-            logger.warn(`⚠️ [Telegram 409 Conflict] Long polling stopped on PID ${process.pid} (${os.hostname()}): another bot instance is using the same BOT_TOKEN.`);
-          } else {
-            logger.error(`❌ Telegram launch failed: ${err.message}`);
-          }
-        });
-
-      isBotRunning = true;
-      logger.info(`[Bot ${PROCESS_INSTANCE_ID}] Polling started: YES`);
-      logger.info('🤖 NexTeraDownloadBot is online 24/7');
+       await pollingManager.start(bot);
     }
 
   } catch (error: any) {
@@ -313,33 +238,8 @@ const shutdown = async (signal: string) => {
   logger.info(`🛑 Received ${signal} on PID ${process.pid} (${os.hostname()})`);
   logger.info('🧹 Shutting down...');
 
-  if (pollingLockRenewalTimer) {
-    clearInterval(pollingLockRenewalTimer);
-    pollingLockRenewalTimer = null;
-  }
-
-  // Release Redis polling lock so other instances/replicas can take over immediately
-  try {
-    const { redis } = require('./redis');
-    const releaseScript = `
-      if redis.call("get", KEYS[1]) == ARGV[1] then
-        return redis.call("del", KEYS[1])
-      else
-        return 0
-      end
-    `;
-    await redis.eval(releaseScript, 1, 'lock:telegram_polling', PROCESS_INSTANCE_ID);
-    logger.info('🟢 Telegram polling lock released');
-  } catch (e) {}
-
-  if (isBotRunning || isPollingLaunched) {
-    try {
-      bot.stop(signal);
-      logger.info('🟢 Telegram stopped');
-    } catch (error) {}
-    isBotRunning = false;
-    isPollingLaunched = false;
-  }
+  // Stop polling manager and release distributed lock atomically
+  await pollingManager.stop(signal);
 
   try {
     const { closeWorker } = require('./queue/worker');
@@ -376,6 +276,14 @@ const shutdown = async (signal: string) => {
 
 process.once('SIGINT', () => shutdown('SIGINT'));
 process.once('SIGTERM', () => shutdown('SIGTERM'));
+process.on('uncaughtException', (err) => {
+  logger.error(`[Process] Uncaught Exception: ${err.message}`);
+  shutdown('uncaughtException');
+});
+process.on('unhandledRejection', (reason: any) => {
+  logger.error(`[Process] Unhandled Rejection: ${reason?.message || reason}`);
+});
 
-export { bot, isPollingLaunched, isBotRunning };
+export { bot };
+
 
