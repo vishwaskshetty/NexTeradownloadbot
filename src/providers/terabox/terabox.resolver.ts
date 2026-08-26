@@ -24,6 +24,8 @@ export interface TeraBoxShareMetadata {
   uk?: string;
   timestamp?: number;
   sign?: string;
+  jsToken?: string;
+  cookies?: string;
   fileList: TeraBoxFileItem[];
 }
 
@@ -62,7 +64,7 @@ export const TERABOX_DOMAINS = [
 /**
  * Diagnostic logger for candidate values without leaking secrets or full signed URLs
  */
-function describeCandidate(name: string, value: unknown): void {
+export function describeCandidate(name: string, value: unknown): void {
   logger.info(
     `[TeraBox Debug] ${name}: ` +
       JSON.stringify({
@@ -73,6 +75,28 @@ function describeCandidate(name: string, value: unknown): void {
           value && typeof value === 'object' && !Array.isArray(value)
             ? Object.keys(value as Record<string, unknown>)
             : undefined,
+      })
+  );
+}
+
+/**
+ * Diagnostic logger for provider API responses (errno, errmsg, requestId, keys)
+ */
+export function describeProviderResponse(name: string, response: unknown): void {
+  if (!response || typeof response !== 'object') {
+    logger.info(`[TeraBox Debug] ${name}: ` + JSON.stringify({ type: typeof response }));
+    return;
+  }
+
+  const obj = response as Record<string, unknown>;
+
+  logger.info(
+    `[TeraBox Debug] ${name}: ` +
+      JSON.stringify({
+        keys: Object.keys(obj),
+        errno: obj.errno,
+        errmsg: typeof obj.errmsg === 'string' ? obj.errmsg.slice(0, 300) : undefined,
+        requestId: obj.request_id ?? obj.request_id_string,
       })
   );
 }
@@ -323,6 +347,31 @@ export class TeraBoxResolver {
 
     let fileList: TeraBoxFileItem[] = [];
 
+    let shareId: string | undefined;
+    let uk: string | undefined;
+    let sign: string | undefined;
+    let timestamp: number | undefined;
+    let jsToken: string | undefined;
+    let sessionCookies: string | undefined;
+
+    // Scrape share page to extract active jsToken and session cookies
+    try {
+      const pageRes = await axios.get(`https://dm.terabox.app/sharing/link?surl=1${shareCode}`, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
+        timeout: 10000,
+      });
+
+      const html = String(pageRes.data || '');
+      const jsTokenMatch = html.match(/fn%28%22([0-9A-Fa-f]+)%22%29/) || decodeURIComponent(html).match(/fn\("([0-9A-Fa-f]+)"\)/);
+      jsToken = jsTokenMatch ? jsTokenMatch[1] : undefined;
+      sessionCookies = pageRes.headers['set-cookie']
+        ? pageRes.headers['set-cookie'].map((c: string) => c.split(';')[0]).join('; ')
+        : undefined;
+    } catch {}
+
     // Strategy 1: Configured Gateway Service (if set)
     if (config.TERABOX_GATEWAY_URL) {
       try {
@@ -349,18 +398,23 @@ export class TeraBoxResolver {
       } catch {}
     }
 
-    // Strategy 3: Unofficial TeraBox API (shorturlinfo & share/list)
-    let shareId: string | undefined;
-    let uk: string | undefined;
-    let sign: string | undefined;
-    let timestamp: number | undefined;
-
+    // Strategy 3: Unofficial shorturlinfo with jsToken and cookies
     if (fileList.length === 0) {
       const infoUrl = `${this.UNOFFICIAL_API_BASE}/api/shorturlinfo`;
       try {
         const data = await this.safeFetch(infoUrl, {
           method: 'GET',
-          params: { shorturl: shareCode, root: '1' },
+          params: {
+            app_id: '250528',
+            shorturl: `1${shareCode}`,
+            root: '1',
+            ...(jsToken ? { jsToken } : {}),
+          },
+          headers: {
+            ...(sessionCookies ? { Cookie: sessionCookies } : {}),
+            Referer: `https://dm.terabox.app/sharing/link?surl=1${shareCode}`,
+            Origin: 'https://www.terabox.app',
+          },
         });
         if (data && data.errno === 0 && Array.isArray(data.list)) {
           fileList = data.list;
@@ -376,14 +430,24 @@ export class TeraBoxResolver {
         try {
           const shareListData = await this.safeFetch(shareListUrl, {
             method: 'GET',
-            params: { app_id: '250528', shorturl: shareCode, root: '1' },
+            params: {
+              app_id: '250528',
+              shorturl: shareCode,
+              root: '1',
+              ...(jsToken ? { jsToken } : {}),
+            },
+            headers: {
+              ...(sessionCookies ? { Cookie: sessionCookies } : {}),
+              Referer: `https://dm.terabox.app/sharing/link?surl=1${shareCode}`,
+              Origin: 'https://www.terabox.app',
+            },
           });
           if (shareListData && shareListData.errno === 0 && Array.isArray(shareListData.list)) {
             fileList = shareListData.list;
             shareId = String(shareListData.share_id || shareListData.shareid || '');
             uk = String(shareListData.uk || '');
-            sign = shareListData.sign;
-            timestamp = shareListData.timestamp;
+            sign = shareListData.sign || sign;
+            timestamp = shareListData.timestamp || timestamp;
           }
         } catch {}
       }
@@ -403,6 +467,8 @@ export class TeraBoxResolver {
       uk,
       sign,
       timestamp,
+      jsToken,
+      cookies: sessionCookies,
       fileList,
     };
 
@@ -452,7 +518,7 @@ export class TeraBoxResolver {
     if (config.TERABOX_GATEWAY_URL) {
       try {
         gwRes = await this.safeFetch(`${config.TERABOX_GATEWAY_URL}/api/get-info?shorturl=${shareCode}&fs_id=${file.fs_id}`);
-        describeCandidate('gatewayResponse', gwRes);
+        describeProviderResponse('gatewayResponse', gwRes);
       } catch (gwErr: any) {
         logger.warn(`[TeraBox] Gateway request failed: ${gwErr.message}`);
       }
@@ -467,6 +533,8 @@ export class TeraBoxResolver {
 
     let downloadUrl: string | null = null;
     let selectedSource = 'none';
+    let lastProviderErrno: number | undefined;
+    let lastProviderErrMsg: string | undefined;
 
     for (const c of candidateSources) {
       const extracted = extractTeraBoxDownloadUrl(c.data);
@@ -477,48 +545,66 @@ export class TeraBoxResolver {
       }
     }
 
+    const activeJsToken = shareMetadata.jsToken;
+    const activeCookies = shareMetadata.cookies;
+
     // Dynamic HTML jsToken + session cookie RPC
     if (!downloadUrl && shareMetadata.shareId && shareMetadata.uk) {
       try {
-        const pageRes = await axios.get(`https://www.terabox.app/sharing/link?surl=${shareCode}`, {
+        logger.info(`[TeraBox Debug] jsToken present: ${activeJsToken ? 'YES' : 'NO'}`);
+        logger.info(`[TeraBox] Requesting actual download link`);
+
+        const downloadUrlObj = new URL(`${this.UNOFFICIAL_API_BASE}/share/download`);
+        downloadUrlObj.searchParams.set('app_id', '250528');
+        downloadUrlObj.searchParams.set('web', '1');
+        downloadUrlObj.searchParams.set('channel', 'dubox');
+        downloadUrlObj.searchParams.set('clienttype', '0');
+        if (activeJsToken) {
+          downloadUrlObj.searchParams.set('jsToken', activeJsToken);
+        }
+        if (shareMetadata.shareId) {
+          downloadUrlObj.searchParams.set('shareid', String(shareMetadata.shareId));
+        }
+        if (shareMetadata.sign) {
+          downloadUrlObj.searchParams.set('sign', String(shareMetadata.sign));
+        }
+        if (shareMetadata.timestamp) {
+          downloadUrlObj.searchParams.set('timestamp', String(shareMetadata.timestamp));
+        }
+
+        const downloadRes = await this.safeFetch(downloadUrlObj.toString(), {
+          method: 'POST',
           headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Referer': `https://dm.terabox.app/sharing/link?surl=1${shareCode}`,
+            'Origin': 'https://www.terabox.app',
+            ...(activeCookies ? { 'Cookie': activeCookies } : {}),
           },
-          timeout: 10000,
+          data: new URLSearchParams({
+            product: 'share',
+            nozip: '0',
+            fid_list: `[${file.fs_id}]`,
+            uk: String(shareMetadata.uk),
+            primaryid: String(shareMetadata.shareId),
+            shareid: String(shareMetadata.shareId),
+            sign: String(shareMetadata.sign || ''),
+            timestamp: String(shareMetadata.timestamp || Math.floor(Date.now() / 1000)),
+          }).toString(),
         });
 
-        const html = pageRes.data;
-        const jsTokenMatch = html.match(/fn%28%22([A-Fa-f0-9]+)%22%29/) || decodeURIComponent(html).match(/fn\("([A-Fa-f0-9]+)"\)/);
-        const jsToken = jsTokenMatch ? jsTokenMatch[1] : undefined;
-        const pageCookies = pageRes.headers['set-cookie'] ? pageRes.headers['set-cookie'].map((c: string) => c.split(';')[0]).join('; ') : '';
+        describeProviderResponse('dynamicDownloadRes', downloadRes);
 
-        if (jsToken) {
-          logger.info(`[TeraBox Debug] jsToken present: YES`);
-          const downloadRes = await this.safeFetch(`${this.UNOFFICIAL_API_BASE}/share/download?app_id=250528&web=1&channel=dubox&clienttype=0&jsToken=${jsToken}`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/x-www-form-urlencoded',
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-              'Referer': `https://www.terabox.app/sharing/link?surl=${shareCode}`,
-              ...(pageCookies ? { 'Cookie': pageCookies } : {}),
-            },
-            data: new URLSearchParams({
-              share_id: String(shareMetadata.shareId),
-              uk: String(shareMetadata.uk),
-              sign: shareMetadata.sign || '',
-              timestamp: String(shareMetadata.timestamp || Math.floor(Date.now() / 1000)),
-              fid_list: JSON.stringify([file.fs_id]),
-              primaryid: String(shareMetadata.shareId),
-            }).toString(),
-          });
-
-          describeCandidate('dynamicDownloadRes', downloadRes);
+        if (downloadRes && (downloadRes.errno === 0 || downloadRes.errno === undefined)) {
           const extracted = extractTeraBoxDownloadUrl(downloadRes);
           if (extracted) {
             downloadUrl = extracted;
             selectedSource = 'dynamic /share/download with jsToken';
           }
+        } else if (downloadRes && downloadRes.errno !== undefined) {
+          lastProviderErrno = downloadRes.errno;
+          lastProviderErrMsg = downloadRes.errmsg;
+          logger.warn(`[TeraBox] Dynamic download request rejected: errno=${downloadRes.errno}, errmsg=${downloadRes.errmsg || 'none'}`);
         }
       } catch (err: any) {
         logger.warn(`[TeraBox] Dynamic jsToken resolution failed: ${err.message}`);
@@ -536,19 +622,26 @@ export class TeraBoxResolver {
             ...(config.TERABOX_NDUS ? { 'Cookie': `ndus=${config.TERABOX_NDUS}` } : {})
           },
           data: new URLSearchParams({
+            product: 'share',
+            nozip: '0',
+            fid_list: `[${file.fs_id}]`,
             share_id: String(shareMetadata.shareId),
             uk: String(shareMetadata.uk),
-            sign: shareMetadata.sign || '',
+            sign: String(shareMetadata.sign || ''),
             timestamp: String(shareMetadata.timestamp || Math.floor(Date.now() / 1000)),
-            fid_list: JSON.stringify([file.fs_id]),
             primaryid: String(shareMetadata.shareId),
           }).toString()
         });
-        describeCandidate('unofficialDownloadRes', downloadRes);
-        const extracted = extractTeraBoxDownloadUrl(downloadRes);
-        if (extracted) {
-          downloadUrl = extracted;
-          selectedSource = 'unofficial /share/download';
+        describeProviderResponse('unofficialDownloadRes', downloadRes);
+        if (downloadRes && (downloadRes.errno === 0 || downloadRes.errno === undefined)) {
+          const extracted = extractTeraBoxDownloadUrl(downloadRes);
+          if (extracted) {
+            downloadUrl = extracted;
+            selectedSource = 'unofficial /share/download';
+          }
+        } else if (downloadRes && downloadRes.errno !== undefined) {
+          lastProviderErrno = downloadRes.errno;
+          lastProviderErrMsg = downloadRes.errmsg;
         }
       } catch {}
     }
@@ -556,7 +649,7 @@ export class TeraBoxResolver {
     if (!downloadUrl && hasTeraBoxCredentials()) {
       try {
         const officialDlink = await this.getOfficialDownloadUrl(config.TERABOX_ACCESS_TOKEN!, String(file.fs_id), shareCode);
-        describeCandidate('officialDlink', officialDlink);
+        describeProviderResponse('officialDlink', officialDlink);
         const extracted = extractTeraBoxDownloadUrl(officialDlink);
         if (extracted) {
           downloadUrl = extracted;
@@ -566,9 +659,10 @@ export class TeraBoxResolver {
     }
 
     if (!downloadUrl) {
-      logger.error(`[TeraBox] Failed to extract valid direct download URL for fs_id ${file.fs_id}`);
+      const errDetail = lastProviderErrno !== undefined ? ` (errno=${lastProviderErrno}${lastProviderErrMsg ? `, errmsg=${lastProviderErrMsg}` : ''})` : '';
+      logger.error(`[TeraBox] Failed to extract valid direct download URL for fs_id ${file.fs_id}${errDetail}`);
       throw new ProviderUnavailableError(
-        'TeraBox metadata was resolved, but no valid direct download URL was returned.'
+        `TeraBox download request rejected${errDetail}.`
       );
     }
 
