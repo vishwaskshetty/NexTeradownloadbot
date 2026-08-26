@@ -22,6 +22,18 @@ app.get('/health', (req, res) => {
   });
 });
 
+// GET /version - Safe metadata endpoint reporting version, commit SHA and uptime
+app.get('/version', (req, res) => {
+  return res.status(200).json({
+    status: 'ok',
+    version: '1.0.0',
+    commit: 'd70512d',
+    role: process.env.BOT_ROLE || 'bot',
+    uptime: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString()
+  });
+});
+
 // GET /ready - Dependency readiness health report (PostgreSQL & Redis status)
 app.get('/ready', async (req, res) => {
   let dbStatus = false;
