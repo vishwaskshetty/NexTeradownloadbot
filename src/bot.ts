@@ -154,17 +154,29 @@ export const start = async () => {
 
     // 1. Connect/check PostgreSQL
     if (config.NODE_ENV !== 'test') {
-      try {
-        logger.info('Checking PostgreSQL...');
-        const maskedUrl = (config.DATABASE_URL || '')
-          .replace(/:([^:@]+)@/, ':***@');
-        logger.info(`[DB] Connecting to: ${maskedUrl}`);
-        await db.$queryRawUnsafe('SELECT 1');
-        logger.info('Connected to PostgreSQL successfully\n');
-      } catch (err: any) {
-        const maskedUrl = (config.DATABASE_URL || '')
-          .replace(/:([^:@]+)@/, ':***@');
-        logger.error(`[DB] Connection failed: ${err.message?.split('\n')[0] ?? err}`);
+      const maskedUrl = (config.DATABASE_URL || '').replace(/:([^:@]+)@/, ':***@');
+      logger.info('Checking PostgreSQL...');
+      logger.info(`[DB] Connecting to: ${maskedUrl}`);
+      
+      let dbConnected = false;
+      let lastDbError: any = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          await db.$queryRawUnsafe('SELECT 1');
+          dbConnected = true;
+          logger.info('Connected to PostgreSQL successfully\n');
+          break;
+        } catch (err: any) {
+          lastDbError = err;
+          if (attempt < 3) {
+            logger.warn(`[DB] PostgreSQL connection attempt ${attempt} failed: ${err.message?.split('\n')[0] ?? err}. Retrying in 2s...`);
+            await new Promise(r => setTimeout(r, 2000));
+          }
+        }
+      }
+
+      if (!dbConnected) {
+        logger.error(`[DB] Connection failed after 3 attempts: ${lastDbError?.message?.split('\n')[0] ?? lastDbError}`);
         logger.error(`[DB] Check DATABASE_URL in .env — currently: ${maskedUrl}`);
         logger.error('[DB] For Supabase: use port 6543 (transaction pooler) with ?sslmode=require&pgbouncer=true');
         throw new Error('Could not connect to PostgreSQL at startup. Check DATABASE_URL in .env.');
