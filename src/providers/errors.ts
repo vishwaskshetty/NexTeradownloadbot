@@ -40,3 +40,52 @@ export class ProviderAccessError extends ProviderError {
     this.name = 'ProviderAccessError';
   }
 }
+
+export class TeraBoxResolverError extends ProviderError {
+  constructor(
+    message: string,
+    public readonly stage: string,
+    public readonly errno?: number,
+    public readonly requestId?: string,
+    code = 'TERABOX_RESOLVER_ERROR'
+  ) {
+    super(message, code, 'TeraBox');
+    this.name = 'TeraBoxResolverError';
+  }
+}
+
+export class TeraBoxSessionError extends TeraBoxResolverError {
+  constructor(message = 'Failed to establish TeraBox share session.', stage = 'session') {
+    super(message, stage, undefined, undefined, 'TERABOX_SESSION_ERROR');
+    this.name = 'TeraBoxSessionError';
+  }
+}
+
+export class TeraBoxMetadataError extends TeraBoxResolverError {
+  constructor(message = 'Failed to retrieve TeraBox share metadata.', stage = 'metadata', errno?: number, requestId?: string) {
+    super(message, stage, errno, requestId, 'TERABOX_METADATA_ERROR');
+    this.name = 'TeraBoxMetadataError';
+  }
+}
+
+export class TeraBoxMissingContextError extends TeraBoxResolverError {
+  constructor(message: string, stage = 'validation') {
+    super(message, stage, undefined, undefined, 'TERABOX_MISSING_CONTEXT');
+    this.name = 'TeraBoxMissingContextError';
+  }
+}
+
+export class TeraBoxProviderError extends TeraBoxResolverError {
+  constructor(message: string, stage = 'download', errno?: number, requestId?: string) {
+    super(message, stage, errno, requestId, 'TERABOX_PROVIDER_ERROR');
+    this.name = 'TeraBoxProviderError';
+  }
+}
+
+export class TeraBoxDownloadUrlError extends TeraBoxResolverError {
+  constructor(message = 'TeraBox returned no valid direct download URL.', stage = 'extraction') {
+    super(message, stage, undefined, undefined, 'TERABOX_DOWNLOAD_URL_ERROR');
+    this.name = 'TeraBoxDownloadUrlError';
+  }
+}
+

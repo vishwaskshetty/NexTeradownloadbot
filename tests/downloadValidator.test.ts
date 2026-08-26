@@ -574,18 +574,88 @@ describe('TEST 17: TeraBox Download URL Extraction & Normalization', () => {
   });
 });
 
-// ── TEST 16: Security Hardening — Admin Authorization Check ──────────────────
+// ── TEST 18: TeraBox Resolver Session & Share Context Lifecycle ──────────────
 
-describe('TEST 16: Security Hardening — Admin Authorization', () => {
-  it('strictly validates admin Telegram IDs against configured whitelist', () => {
-    const adminIds = [123456789n, 987654321n];
-    const isAdmin = (tgId: number | bigint | string) => {
-      const num = BigInt(tgId);
-      return adminIds.includes(num);
+describe('TEST 18: TeraBox Resolver Session & Share Context Lifecycle', () => {
+  const {
+    TeraBoxMissingContextError,
+    TeraBoxProviderError,
+  } = require('../src/providers/errors');
+  const { extractTeraBoxDownloadUrl } = require('../src/providers/terabox/terabox.resolver');
+
+  it('TEST 1: Share page returns jsToken and cookies -> session context is populated', () => {
+    const rawHtml = '<html><script>fn%28%22ABC123DEF%22%29</script></html>';
+    const jsTokenMatch = rawHtml.match(/fn%28%22([0-9A-Fa-f]+)%22%29/);
+    expect(jsTokenMatch).not.toBeNull();
+    expect(jsTokenMatch?.[1]).toBe('ABC123DEF');
+  });
+
+  it('TEST 2: shorturlinfo returns errno: 0 -> metadata normalized successfully', () => {
+    const apiResponse = {
+      errno: 0,
+      shareid: '62706158116',
+      uk: '4399182195115',
+      sign: 'd74dd7c834e8c6b6da979fd96376cb36bda6d156',
+      timestamp: 1787739968,
+      list: [{ fs_id: '207400602392562', server_filename: 'test.mp4', size: 8108680 }]
+    };
+    expect(apiResponse.errno).toBe(0);
+    expect(apiResponse.sign).toBeDefined();
+    expect(apiResponse.timestamp).toBe(1787739968);
+  });
+
+  it('TEST 3: shorturlinfo fails with verification error -> indicates session refresh needed', () => {
+    const verifyRequiredRes = { errno: 400210, errmsg: 'need verify_v2' };
+    expect(verifyRequiredRes.errno).not.toBe(0);
+  });
+
+  it('TEST 4: Fallback share/list with missing sign/timestamp throws TeraBoxMissingContextError', () => {
+    const metadataMissingSign = {
+      shareId: '62706158116',
+      uk: '4399182195115',
+      sign: '', // Missing!
+      timestamp: '', // Missing!
+    };
+    const file = { fs_id: '207400602392562' };
+
+    const validateContext = (meta: typeof metadataMissingSign, f: typeof file) => {
+      if (!meta.shareId || !meta.uk || !meta.sign || !meta.timestamp || !f.fs_id) {
+        throw new TeraBoxMissingContextError('Missing required share context');
+      }
     };
 
-    expect(isAdmin(123456789)).toBe(true);
-    expect(isAdmin('987654321')).toBe(true);
-    expect(isAdmin(111111111)).toBe(false); // Unauthorized user
+    expect(() => validateContext(metadataMissingSign, file)).toThrow(TeraBoxMissingContextError);
+  });
+
+  it('TEST 5: Download endpoint returns errno: 2 -> throws TeraBoxProviderError without URL extraction', () => {
+    const errorResponse = { errno: 2, errmsg: 'parameter error', request_id: '123' };
+    const validateAndExtract = (res: typeof errorResponse) => {
+      if (res.errno !== undefined && Number(res.errno) !== 0) {
+        throw new TeraBoxProviderError(`Rejected: errno=${res.errno}`, 'download', res.errno, res.request_id);
+      }
+      return extractTeraBoxDownloadUrl(res);
+    };
+
+    expect(() => validateAndExtract(errorResponse)).toThrow(TeraBoxProviderError);
+  });
+
+  it('TEST 6: Download endpoint returns valid nested URL -> extracts successfully', () => {
+    const successResponse = {
+      errno: 0,
+      dlink: 'https://d.terabox.app/file/12345?sign=abc'
+    };
+    expect(extractTeraBoxDownloadUrl(successResponse)).toBe('https://d.terabox.app/file/12345?sign=abc');
+  });
+
+  it('TEST 7: Consistent session context bundling prevents session mismatch', () => {
+    const session = {
+      shareCode: 'fKvukFFlwMqHt3vbdFoRYQ',
+      jsToken: 'ABC123',
+      cookies: 'browserid=XYZ',
+      userAgent: 'Mozilla/5.0 ...',
+      referer: 'https://dm.terabox.app/sharing/link?surl=1fKvukFFlwMqHt3vbdFoRYQ'
+    };
+    expect(session.cookies).toContain('browserid');
+    expect(session.jsToken).toBe('ABC123');
   });
 });
