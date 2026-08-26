@@ -334,26 +334,30 @@ export class TeraBoxResolver {
       } catch {}
     }
 
+    const candidates = [
+      { source: 'file.dlink', url: file.dlink },
+      { source: 'file.downloadUrl', url: (file as any).downloadUrl },
+      { source: 'gateway', url: gwRes?.downloadUrl },
+      { source: 'gateway', url: gwRes?.dlink },
+      { source: 'gateway.data', url: gwRes?.data?.downloadUrl },
+      { source: 'gateway.data', url: gwRes?.data?.dlink },
+    ];
+
     let downloadUrl: string | null = null;
-    let urlSource = 'none';
+    let selectedSource = 'none';
 
-    const candidate =
-      file.dlink ||
-      (file as any).downloadUrl ||
-      gwRes?.downloadUrl ||
-      gwRes?.dlink ||
-      gwRes?.data?.downloadUrl ||
-      gwRes?.data?.dlink;
-
-    if (typeof candidate === 'string' && /^https?:\/\//i.test(candidate)) {
-      downloadUrl = candidate;
-      urlSource = file.dlink ? 'file.dlink' : 'gateway';
+    for (const c of candidates) {
+      if (typeof c.url === 'string' && /^https?:\/\//i.test(c.url)) {
+        downloadUrl = c.url;
+        selectedSource = c.source;
+        break;
+      }
     }
 
     if (!downloadUrl && hasTeraBoxCredentials()) {
       try {
         downloadUrl = await this.getOfficialDownloadUrl(config.TERABOX_ACCESS_TOKEN!, String(file.fs_id), shareCode);
-        urlSource = 'official API';
+        selectedSource = 'official API';
       } catch {}
     }
 
@@ -364,7 +368,7 @@ export class TeraBoxResolver {
       );
     }
 
-    logger.info(`[TeraBox] Direct URL source: ${urlSource} for "${fileName}" (${fileSize} bytes)`);
+    logger.info(`[TeraBox] Direct URL source: ${selectedSource}`);
 
     const headers: Record<string, string> = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',

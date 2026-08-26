@@ -14,9 +14,18 @@ import http from 'http';
 
 const bot = new Telegraf(config.BOT_TOKEN);
 let server: http.Server | null = null;
+let isPollingLaunched = false;
+let isBotRunning = false;
+let workersInitialized = false;
 
-// Global Error Handler
+// Global Error Handler & 409 Conflict Guard
 bot.catch((err: unknown, ctx) => {
+  const error = err as any;
+  if (error?.response?.error_code === 409 || error?.message?.includes('409') || error?.message?.includes('Conflict')) {
+    logger.warn('⚠️ [Telegram 409 Conflict] Another bot instance is currently running with the same BOT_TOKEN. Polling stopped on this process.');
+    isBotRunning = false;
+    return;
+  }
   handleError(err as Error, ctx);
 });
 
@@ -112,20 +121,24 @@ bot.on('callback_query', (ctx) => callbackHandler(ctx));
 // Messages
 bot.on('text', (ctx) => messageHandler(ctx));
 
-// Start the bot gracefully
-let isBotRunning = false;
-let workersInitialized = false;
-
 const start = async () => {
   try {
     // 1. Connect/check PostgreSQL
     if (config.NODE_ENV !== 'test') {
       try {
         logger.info('Checking PostgreSQL...');
-        await db.$queryRaw`SELECT 1`;
+        const maskedUrl = (config.DATABASE_URL || '')
+          .replace(/:([^:@]+)@/, ':***@');
+        logger.info(`[DB] Connecting to: ${maskedUrl}`);
+        await db.$queryRawUnsafe('SELECT 1');
         logger.info('Connected to PostgreSQL successfully\n');
-      } catch (err) {
-        throw new Error('Could not connect to PostgreSQL at startup.');
+      } catch (err: any) {
+        const maskedUrl = (config.DATABASE_URL || '')
+          .replace(/:([^:@]+)@/, ':***@');
+        logger.error(`[DB] Connection failed: ${err.message?.split('\n')[0] ?? err}`);
+        logger.error(`[DB] Check DATABASE_URL in .env — currently: ${maskedUrl}`);
+        logger.error('[DB] For Supabase: use port 6543 (transaction pooler) with ?sslmode=require&pgbouncer=true');
+        throw new Error('Could not connect to PostgreSQL at startup. Check DATABASE_URL in .env.');
       }
     }
 
@@ -134,9 +147,20 @@ const start = async () => {
       try {
         logger.info('Checking Redis...');
         const { redis } = require('./redis');
-        await redis.ping();
-        console.log('');
-      } catch (err) {
+        const maskedRedisUrl = (config.REDIS_URL || '').replace(/:([^:@]+)@/, ':***@');
+        logger.info(`[Redis] Connecting to: ${maskedRedisUrl}`);
+        // Apply a 15-second timeout to avoid hanging indefinitely
+        await Promise.race([
+          redis.ping(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Redis ping timed out after 15s')), 15000)
+          ),
+        ]);
+        logger.info('Redis connected successfully\n');
+      } catch (err: any) {
+        const maskedRedisUrl = (config.REDIS_URL || '').replace(/:([^:@]+)@/, ':***@');
+        logger.error(`[Redis] Connection failed: ${err.message}`);
+        logger.error(`[Redis] Check REDIS_URL in .env — currently: ${maskedRedisUrl}`);
         throw new Error('Redis connection failed during startup health check.');
       }
     }
@@ -162,34 +186,52 @@ const start = async () => {
        logger.info('Workers initialized successfully\n');
     }
 
-    // 5. Remove any leftover Telegram webhooks before long polling
-    logger.info('Removing Telegram webhook...');
-    try {
-      await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-      logger.info('Telegram webhook removed successfully\n');
-    } catch (e) {
-      logger.error('Failed to remove Telegram webhook.');
-    }
+    // 5. Test Telegram Bot Connection & Remove leftover webhooks (Single-Instance Guard)
+    if (config.NODE_ENV !== 'test' && config.ENABLE_TELEGRAM_POLLING) {
+      if (isPollingLaunched) {
+        logger.warn('⚠️ Telegram polling already launched on this process. Skipping duplicate startup.');
+        return;
+      }
 
-    // 6. Start Telegram bot long polling (Runs in both Dev & Production)
-    if (config.NODE_ENV !== 'test') {
+      logger.info('Testing Telegram Bot Connection...');
+      try {
+        const me = await bot.telegram.getMe();
+        logger.info(`[Bot] Telegram token configured: YES`);
+        logger.info(`[Bot] Telegram initialization: SUCCESS (@${me.username})`);
+      } catch (e: any) {
+        if (e?.response?.error_code === 409 || e?.message?.includes('409') || e?.message?.includes('Conflict')) {
+          logger.warn('⚠️ [Telegram 409 Conflict] Another bot instance is currently active with the same BOT_TOKEN.');
+          return;
+        }
+        logger.error(`[Bot] Telegram initialization FAILED: ${e.message}`);
+        throw e;
+      }
+
+      logger.info('Removing Telegram webhook...');
+      try {
+        await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+        logger.info('Telegram webhook removed successfully\n');
+      } catch (e) {
+        logger.error('Failed to remove Telegram webhook.');
+      }
+
+      // 6. Launch Telegram long polling with singleton process flag
+      isPollingLaunched = true;
       logger.info('🚀 Starting NexTeraDownloadBot Telegram polling...');
-
+      
       bot.launch({ dropPendingUpdates: true })
-        .then(() => {
-          isBotRunning = true;
-          logger.info('🟢 PostgreSQL connected');
-          logger.info('🟢 Redis connected');
-          logger.info('🟢 HTTP server started');
-          logger.info('🟢 Queue initialized');
-          logger.info('🟢 Workers initialized');
-          logger.info('🟢 Telegram bot started');
-          logger.info('🤖 NexTeraDownloadBot is online 24/7');
-        })
-        .catch((err) => {
+        .catch((err: any) => {
           isBotRunning = false;
-          logger.error(`❌ Telegram launch failed: ${err.message}`);
+          if (err?.response?.error_code === 409 || err?.message?.includes('409') || err?.message?.includes('Conflict')) {
+            logger.warn('⚠️ [Telegram 409 Conflict] Long polling stopped: another bot instance is using the same BOT_TOKEN.');
+          } else {
+            logger.error(`❌ Telegram launch failed: ${err.message}`);
+          }
         });
+
+      isBotRunning = true;
+      logger.info('[Bot] Polling started: YES');
+      logger.info('🤖 NexTeraDownloadBot is online 24/7');
     }
 
   } catch (error: any) {
@@ -231,12 +273,13 @@ const shutdown = async (signal: string) => {
   logger.info(`🛑 Received ${signal}`);
   logger.info('🧹 Shutting down...');
 
-  if (isBotRunning) {
+  if (isBotRunning || isPollingLaunched) {
     try {
       bot.stop(signal);
       logger.info('🟢 Telegram stopped');
     } catch (error) {}
     isBotRunning = false;
+    isPollingLaunched = false;
   }
 
   try {

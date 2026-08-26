@@ -4,7 +4,8 @@ const envSchema = z.object({
   BOT_TOKEN: z.string().min(1, 'BOT_TOKEN is required'),
   DATABASE_URL: process.env.NODE_ENV === 'test'
     ? z.string().default('file:./dev.db')
-    : z.string().url('DATABASE_URL must be a valid connection string in .env'),
+    : z.string().min(1, 'DATABASE_URL must be set in .env'),
+  DIRECT_URL: z.string().optional(), // Non-pooled Supabase URL for Prisma migrations
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   LOG_LEVEL: z.string().default('info'),
   SHORTENER_PROVIDER: z.string().default('arolinks'),
@@ -25,6 +26,7 @@ const envSchema = z.object({
   STORAGE_CHANNEL_ID: z.string().optional(),
   STORAGE_RETENTION_HOURS: z.coerce.number().default(24),
   BOT_USERNAME: z.string().default('NexTeraDownloadBot'),
+  ENABLE_TELEGRAM_POLLING: z.coerce.boolean().default(true),
   REFERRAL_ENABLED: z.coerce.boolean().default(true),
   REFERRALS_REQUIRED: z.coerce.number().default(10),
   REFERRAL_REWARD_DAYS: z.coerce.number().default(5),

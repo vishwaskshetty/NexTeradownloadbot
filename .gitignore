@@ -2,6 +2,13 @@
 .env.*
 !.env.example
 node_modules/
+node_modules - Copy/
 dist/
+dist - Copy/
+api - Copy/
 *.log
 prisma/dev.db
+test-db.js
+test-redis.js
+tatus
+tatusgit*
