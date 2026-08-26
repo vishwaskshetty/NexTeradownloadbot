@@ -683,9 +683,8 @@ export class TeraBoxResolver {
     const activeJsToken = shareMetadata.jsToken;
     const activeCookies = shareMetadata.cookies;
 
-    // Dynamic HTML jsToken + session cookie RPC
+    // Primary Strategy: Authenticated Pahadi10 reference download flow
     if (!downloadUrl) {
-      // Validate share context required fields before calling download endpoint
       validateDownloadContext({
         shareId: shareMetadata.shareId,
         uk: shareMetadata.uk,
@@ -694,112 +693,9 @@ export class TeraBoxResolver {
         fsId: file.fs_id,
       });
 
-      const cookieNames = activeCookies ? activeCookies.split(';').map(c => c.trim().split('=')[0]).filter(Boolean) : [];
-      logger.info(
-        `[TeraBox Debug] Pre-Download Request Audit: ` +
-          JSON.stringify({
-            shareId: shareMetadata.shareId,
-            uk: shareMetadata.uk,
-            fs_id: file.fs_id,
-            signPresent: Boolean(shareMetadata.sign),
-            signLength: shareMetadata.sign ? shareMetadata.sign.length : 0,
-            timestamp: shareMetadata.timestamp,
-            jsTokenPresent: Boolean(activeJsToken),
-            cookieNames,
-            queryParams: ['app_id'],
-            bodyParams: ['product', 'nozip', 'fid_list', 'share_id', 'uk', 'sign', 'timestamp', 'primaryid'],
-            targetHost: new URL(this.UNOFFICIAL_API_BASE).hostname,
-            targetPath: '/share/download',
-            httpMethod: 'POST',
-            contentType: 'application/x-www-form-urlencoded',
-            refererHost: 'dm.terabox.app',
-          })
-      );
-
-      logger.info(`[TeraBox] Stage 6: Requesting download URL for fs_id ${file.fs_id}`);
-
-      const downloadEndpoint = `${this.UNOFFICIAL_API_BASE}/share/download?app_id=250528`;
-
-      logger.info(`[TeraBox] Strategy selected: dynamic /share/download RPC`);
-      logger.info(
-        `[TeraBox] Authentication: ndus=${config.TERABOX_NDUS ? 'YES' : 'NO'}, jsToken=${activeJsToken ? 'YES' : 'NO'}, cookies=${activeCookies ? 'YES' : 'NO'}`
-      );
-      logger.info(`[TeraBox] Reference endpoint: ${new URL(downloadEndpoint).hostname}${new URL(downloadEndpoint).pathname}`);
-
-      const combinedCookies = [
-        activeCookies,
-        config.TERABOX_NDUS ? `ndus=${config.TERABOX_NDUS}` : '',
-      ].filter(Boolean).join('; ');
-
-      const downloadRes = await this.safeFetch(downloadEndpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-          'Referer': `https://dm.terabox.app/sharing/link?surl=1${shareCode}`,
-          'Origin': 'https://www.terabox.app',
-          ...(combinedCookies ? { Cookie: combinedCookies } : {}),
-        },
-        data: new URLSearchParams({
-          product: 'share',
-          nozip: '0',
-          fid_list: `[${file.fs_id}]`,
-          share_id: String(shareMetadata.shareId),
-          uk: String(shareMetadata.uk),
-          sign: String(shareMetadata.sign),
-          timestamp: String(shareMetadata.timestamp),
-          primaryid: String(shareMetadata.shareId),
-        }).toString(),
-      });
-
-      logger.info(`[TeraBox] Stage 7: Validating provider response`);
-      describeProviderResponse('dynamicDownloadRes', downloadRes);
-
-      if (downloadRes && downloadRes.errno !== undefined && Number(downloadRes.errno) !== 0) {
-        const safeMsg = typeof downloadRes.errmsg === 'string' ? downloadRes.errmsg : 'parameter error';
-        const requestId = downloadRes.request_id ?? downloadRes.request_id_string ?? '';
-        logger.warn(
-          `[TeraBox] Stage 7: Provider rejected download request: ` +
-            JSON.stringify({
-              errno: Number(downloadRes.errno),
-              errmsg: safeMsg,
-              requestId: String(requestId),
-              keys: Object.keys(downloadRes),
-              dataKeys: downloadRes.data && typeof downloadRes.data === 'object' ? Object.keys(downloadRes.data) : undefined,
-            })
-        );
-
-        if (Number(downloadRes.errno) === 400310 || safeMsg.includes('verify_v2') || safeMsg.includes('need verify')) {
-          if (config.TERABOX_NDUS) {
-            throw new TeraBoxAuthRejectedError(
-              'TeraBox rejected the configured account session (TERABOX_NDUS expired or invalid).',
-              'authentication',
-              Number(downloadRes.errno),
-              String(requestId)
-            );
-          } else {
-            throw new TeraBoxAuthRequiredError(
-              'TeraBox authentication is not configured. Required: TERABOX_NDUS',
-              'authentication',
-              Number(downloadRes.errno),
-              String(requestId)
-            );
-          }
-        }
-
-        throw new TeraBoxProviderError(
-          `TeraBox download request rejected: errno=${downloadRes.errno}, errmsg=${safeMsg}`,
-          'download',
-          Number(downloadRes.errno),
-          String(requestId)
-        );
-      }
-
-      const extracted = extractTeraBoxDownloadUrl(downloadRes);
-      if (extracted) {
-        downloadUrl = extracted;
-        selectedSource = 'dynamic /share/download with jsToken';
-      }
+      const pahadiRes = await this.resolveWithPahadi10Flow(file.fs_id, shareMetadata);
+      downloadUrl = pahadiRes.downloadUrl;
+      selectedSource = pahadiRes.source;
     }
 
     if (!downloadUrl && shareMetadata.shareId && shareMetadata.uk && shareMetadata.sign && shareMetadata.timestamp) {
@@ -882,6 +778,115 @@ export class TeraBoxResolver {
       sourceUrl: url,
       headers,
       isUnofficial: !hasTeraBoxCredentials(),
+    };
+  }
+
+  /**
+   * Dedicated implementation of the authenticated Pahadi10 reference download flow.
+   * Uses authenticated context (ndus, jsToken, appId=250528, shareId, uk, sign, timestamp).
+   */
+  async resolveWithPahadi10Flow(
+    fsId: string | number,
+    shareContext: TeraBoxShareMetadata
+  ): Promise<TeraBoxDownloadResult> {
+    const file = shareContext.fileList.find(f => String(f.fs_id) === String(fsId)) || shareContext.fileList[0];
+    if (!file) {
+      throw new NotFoundError('File unavailable in share metadata');
+    }
+
+    const shareCode = shareContext.shareCode || shareContext.surl || '';
+    const fileName = file.server_filename || file.filename || `terabox_${shareCode}.file`;
+    const fileSize = Number(file.size || 0);
+
+    const activeJsToken = shareContext.jsToken;
+    const activeCookies = shareContext.cookies;
+    const normalizedNdusVal = normalizeNdus(config.TERABOX_NDUS);
+
+    logger.info(`[TeraBox] Authenticated strategy: pahadi10-reference`);
+    logger.info(`[TeraBox] NDUS configured: ${normalizedNdusVal ? 'YES' : 'NO'}`);
+    logger.info(`[TeraBox] jsToken: ${activeJsToken ? 'YES' : 'NO'}`);
+    logger.info(`[TeraBox] appId: 250528`);
+    logger.info(`[TeraBox] fs_id: YES`);
+    logger.info(`[TeraBox] sign: ${shareContext.sign ? 'YES' : 'NO'}`);
+    logger.info(`[TeraBox] timestamp: ${shareContext.timestamp ? 'YES' : 'NO'}`);
+
+    const downloadEndpoint = `${this.UNOFFICIAL_API_BASE}/share/download?app_id=250528`;
+
+    const combinedCookies = [
+      activeCookies,
+      normalizedNdusVal ? `ndus=${normalizedNdusVal}` : '',
+    ].filter(Boolean).join('; ');
+
+    const downloadRes = await this.safeFetch(downloadEndpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Referer': `https://dm.terabox.app/sharing/link?surl=1${shareCode}`,
+        'Origin': 'https://www.terabox.app',
+        ...(combinedCookies ? { Cookie: combinedCookies } : {}),
+      },
+      data: new URLSearchParams({
+        product: 'share',
+        nozip: '0',
+        fid_list: `[${file.fs_id}]`,
+        share_id: String(shareContext.shareId),
+        uk: String(shareContext.uk),
+        sign: String(shareContext.sign),
+        timestamp: String(shareContext.timestamp),
+        primaryid: String(shareContext.shareId),
+      }).toString(),
+    });
+
+    const resKeys = downloadRes && typeof downloadRes === 'object' ? Object.keys(downloadRes) : [];
+    logger.info(`[TeraBox] Reference API status: ${downloadRes ? 'SUCCESS' : 'EMPTY'}`);
+    logger.info(`[TeraBox] Reference API errno: ${downloadRes?.errno ?? 'NONE'}`);
+    logger.info(`[TeraBox] Reference API keys: [${resKeys.join(', ')}]`);
+
+    if (downloadRes && downloadRes.errno !== undefined && Number(downloadRes.errno) !== 0) {
+      const safeMsg = typeof downloadRes.errmsg === 'string' ? downloadRes.errmsg : 'parameter error';
+      const requestId = downloadRes.request_id ?? downloadRes.request_id_string ?? '';
+
+      if (Number(downloadRes.errno) === 400310 || safeMsg.includes('verify_v2') || safeMsg.includes('need verify')) {
+        if (normalizedNdusVal) {
+          throw new TeraBoxAuthRejectedError(
+            'TeraBox rejected the configured account session (TERABOX_NDUS expired or invalid).',
+            'authentication',
+            Number(downloadRes.errno),
+            String(requestId)
+          );
+        } else {
+          throw new TeraBoxAuthRequiredError(
+            'TeraBox authentication is not configured. Required: TERABOX_NDUS',
+            'authentication',
+            Number(downloadRes.errno),
+            String(requestId)
+          );
+        }
+      }
+
+      throw new TeraBoxProviderError(
+        `TeraBox download request rejected: errno=${downloadRes.errno}, errmsg=${safeMsg}`,
+        'download',
+        Number(downloadRes.errno),
+        String(requestId)
+      );
+    }
+
+    const extracted = extractTeraBoxDownloadUrl(downloadRes);
+    logger.info(`[TeraBox] Direct link present: ${extracted ? 'YES' : 'NO'}`);
+
+    if (!extracted) {
+      throw new TeraBoxLinkResolutionFailedError(
+        'TeraBox authentication succeeded but no direct download URL was returned.'
+      );
+    }
+
+    return {
+      fileName,
+      size: fileSize,
+      downloadUrl: extracted,
+      source: 'pahadi10-reference',
     };
   }
 

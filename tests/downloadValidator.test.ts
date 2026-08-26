@@ -795,5 +795,87 @@ describe('TEST 21: TeraBox Reference Strategy Adapter & NDUS Normalization', () 
   });
 });
 
+// ── TEST 22: resolveWithPahadi10Flow Implementation & Error Handling ────────
+
+describe('TEST 22: resolveWithPahadi10Flow Implementation & Error Handling', () => {
+  const { teraBoxResolver } = require('../src/providers/terabox/terabox.resolver');
+  const {
+    TeraBoxAuthRequiredError,
+    TeraBoxAuthRejectedError,
+    TeraBoxLinkResolutionFailedError,
+  } = require('../src/providers/errors');
+
+  it('TC1: resolveWithPahadi10Flow exists and has correct signature', () => {
+    expect(typeof teraBoxResolver.resolveWithPahadi10Flow).toBe('function');
+  });
+
+  it('TC2: Mock successful response returns structured TeraBoxDownloadResult', async () => {
+    const mockContext = {
+      shareId: '62706158116',
+      shareCode: 'fKvukFFlwMqHt3vbdFoRYQ',
+      surl: 'fKvukFFlwMqHt3vbdFoRYQ',
+      uk: '4399182195115',
+      timestamp: 1787739968,
+      sign: 'd74dd7c834e8c6b6da979fd96376cb36bda6d156',
+      jsToken: 'ABC123DEF',
+      cookies: 'browserid=XYZ',
+      fileList: [
+        {
+          fs_id: '207400602392562',
+          server_filename: '2026-04-23-18-55-38(8).mp4',
+          size: 8108680,
+          category: 1,
+        }
+      ]
+    };
+
+    const origFetch = teraBoxResolver.safeFetch;
+    teraBoxResolver.safeFetch = async () => ({
+      errno: 0,
+      dlink: 'https://d.terabox.app/file/207400602392562?sign=abcdef'
+    });
+
+    try {
+      const res = await teraBoxResolver.resolveWithPahadi10Flow('207400602392562', mockContext);
+      expect(res.fileName).toBe('2026-04-23-18-55-38(8).mp4');
+      expect(res.size).toBe(8108680);
+      expect(res.downloadUrl).toBe('https://d.terabox.app/file/207400602392562?sign=abcdef');
+      expect(res.source).toBe('pahadi10-reference');
+    } finally {
+      teraBoxResolver.safeFetch = origFetch;
+    }
+  });
+
+  it('TC3: Mock verify_v2 without NDUS throws TeraBoxAuthRequiredError', async () => {
+    const mockContext = {
+      shareId: '62706158116',
+      shareCode: 'fKvukFFlwMqHt3vbdFoRYQ',
+      surl: 'fKvukFFlwMqHt3vbdFoRYQ',
+      uk: '4399182195115',
+      timestamp: 1787739968,
+      sign: 'd74dd7c834e8c6b6da979fd96376cb36bda6d156',
+      jsToken: 'ABC123DEF',
+      cookies: 'browserid=XYZ',
+      fileList: [{ fs_id: '207400602392562', server_filename: 'test.mp4', size: 8108680 }]
+    };
+
+    const origFetch = teraBoxResolver.safeFetch;
+    teraBoxResolver.safeFetch = async () => ({
+      errno: 400310,
+      errmsg: 'need verify_v2',
+      request_id: '8974230873518970796'
+    });
+
+    try {
+      await expect(
+        teraBoxResolver.resolveWithPahadi10Flow('207400602392562', mockContext)
+      ).rejects.toThrow(TeraBoxAuthRequiredError);
+    } finally {
+      teraBoxResolver.safeFetch = origFetch;
+    }
+  });
+});
+
+
 
 
