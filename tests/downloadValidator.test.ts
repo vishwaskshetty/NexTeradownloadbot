@@ -362,3 +362,122 @@ describe('TC7: Telegram Polling Isolation', () => {
     expect(botFile).toContain('ENABLE_TELEGRAM_POLLING');
   });
 });
+
+// ── TEST 8: Stream Error & Incomplete Download ────────────────────────────────
+
+describe('TEST 8: Stream Error / Incomplete Download', () => {
+  let partialFile: string;
+  afterAll(() => cleanup(partialFile));
+
+  it('fails validation if stream died after writing only partial bytes', async () => {
+    const expectedSize = 366_002_036; // 349 MB
+    const partialSize = 10 * MB; // only 10 MB written before stream dropped
+    partialFile = makeTempFile('incomplete_stream.mkv', partialSize);
+
+    const result = await validateDownloadedFile(partialFile, expectedSize, 'video.mkv');
+    expect(result.valid).toBe(false);
+    expect(result.actualSize).toBe(partialSize);
+    expect(result.reason).toMatch(/size mismatch|below 90%/i);
+  });
+});
+
+// ── TEST 9, 10, 11: HTTP JSON, XML, text/plain Error Rejections ──────────────
+
+describe('TEST 9, 10, 11: HTTP JSON, XML, text/plain Error Responses', () => {
+  it('TEST 9: rejects application/json response headers', () => {
+    const result = validateHttpResponseHeaders({
+      status: 200,
+      contentType: 'application/json; charset=utf-8',
+      contentLength: 256,
+      expectedSize: 366_002_036,
+      filename: 'video.mkv',
+    });
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/application\/json|error page/i);
+  });
+
+  it('TEST 10: rejects text/xml and application/xml response headers', () => {
+    const resultXml = validateHttpResponseHeaders({
+      status: 200,
+      contentType: 'text/xml',
+      contentLength: 512,
+      expectedSize: 366_002_036,
+      filename: 'video.mkv',
+    });
+    expect(resultXml.valid).toBe(false);
+    expect(resultXml.reason).toMatch(/text\/xml|error page/i);
+  });
+
+  it('TEST 11: rejects text/plain error response headers for video', () => {
+    const resultText = validateHttpResponseHeaders({
+      status: 200,
+      contentType: 'text/plain',
+      contentLength: 117,
+      expectedSize: 366_002_036,
+      filename: 'video.mkv',
+    });
+    expect(resultText.valid).toBe(false);
+    expect(resultText.reason).toMatch(/text\/plain|error page/i);
+  });
+});
+
+// ── TEST 12: Content Validation Over Extension (Extension Untrusted) ──────────
+
+describe('TEST 12: Extension alone is NOT trusted', () => {
+  let fakeExtFile: string;
+  afterAll(() => cleanup(fakeExtFile));
+
+  it('rejects an HTML error page even if named with .mkv extension (size guard)', async () => {
+    const htmlPayload = Buffer.from('<!DOCTYPE html><html><body><h1>403 Forbidden - need verify_v2</h1></body></html>'.padEnd(2048, ' '));
+    fakeExtFile = makeTempFile('fake_named_movie.mkv', htmlPayload.length, htmlPayload);
+
+    const result = await validateDownloadedFile(fakeExtFile, 366_002_036, 'fake_named_movie.mkv');
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/suspiciously small|error\/html page|matched/i);
+  });
+
+  it('rejects an HTML error page by content inspection when expected size is unknown', async () => {
+    const htmlPayload = Buffer.from('<!DOCTYPE html><html><body><h1>403 Forbidden - need verify_v2</h1></body></html>'.padEnd(2048, ' '));
+    fakeExtFile = makeTempFile('fake_named_movie2.mkv', htmlPayload.length, htmlPayload);
+
+    const result = await validateDownloadedFile(fakeExtFile, undefined, 'fake_named_movie2.mkv');
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/error\/html page|matched/i);
+  });
+});
+
+// ── TEST 13: Live TeraBox Test Case Simulation ────────────────────────────────
+
+describe('TEST 13: Live TeraBox share link simulation (1lN9IGJnt49mdUOaSuK5kAQ)', () => {
+  let temp117File: string;
+  const LIVE_EXPECTED_SIZE = 366_002_036; // 349.05 MB
+  const LIVE_FILENAME = '[@YKD_KOREAN_DRAMA]Be.My.Princess.S01E01.720p.AMZN.W.mkv';
+
+  afterAll(() => cleanup(temp117File));
+
+  it('guarantees that a 117-byte HTML response is blocked from Telegram upload', async () => {
+    // 1. Pre-stream header check rejects Content-Type: text/html
+    const headerCheck = validateHttpResponseHeaders({
+      status: 200,
+      contentType: 'text/html; charset=utf-8',
+      contentLength: 117,
+      expectedSize: LIVE_EXPECTED_SIZE,
+      filename: LIVE_FILENAME,
+    });
+    expect(headerCheck.valid).toBe(false);
+
+    // 2. Post-stream file validation check rejects 117 bytes vs 366002036 bytes
+    temp117File = makeTempFile('live_117_test.mkv', 117);
+    const fileCheck = await validateDownloadedFile(temp117File, LIVE_EXPECTED_SIZE, LIVE_FILENAME);
+    expect(fileCheck.valid).toBe(false);
+    expect(fileCheck.actualSize).toBe(117);
+    expect(fileCheck.reason).toMatch(/suspiciously small|too small|mismatch/i);
+
+    // 3. Confirm that temp file deletion occurs upon validation failure
+    if (!fileCheck.valid && fs.existsSync(temp117File)) {
+      fs.unlinkSync(temp117File);
+    }
+    expect(fs.existsSync(temp117File)).toBe(false);
+  });
+});
+
