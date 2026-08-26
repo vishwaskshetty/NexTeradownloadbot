@@ -89,3 +89,16 @@ export class TeraBoxDownloadUrlError extends TeraBoxResolverError {
   }
 }
 
+export class TeraBoxVerificationRequiredError extends TeraBoxResolverError {
+  constructor(
+    message = 'TeraBox download requires an authenticated account session (TERABOX_NDUS) or official API credentials (TERABOX_ACCESS_TOKEN).',
+    stage = 'verification',
+    errno = 400310,
+    requestId?: string
+  ) {
+    super(message, stage, errno, requestId, 'TERABOX_VERIFICATION_REQUIRED');
+    this.name = 'TeraBoxVerificationRequiredError';
+  }
+}
+
+

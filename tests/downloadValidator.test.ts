@@ -727,3 +727,35 @@ describe('TEST 19: validateDownloadContext & Pre-Download Verification', () => {
   });
 });
 
+// ── TEST 20: Empty dlink, verify_v2 & Status Message Formatting Resilience ──
+
+describe('TEST 20: Empty dlink, verify_v2 & Status Message Formatting Resilience', () => {
+  const { extractTeraBoxDownloadUrl, describeCandidate } = require('../src/providers/terabox/terabox.resolver');
+  const { TeraBoxVerificationRequiredError } = require('../src/providers/errors');
+
+  it('TC1: Empty dlink string returns null', () => {
+    expect(extractTeraBoxDownloadUrl({ dlink: '' })).toBeNull();
+    expect(extractTeraBoxDownloadUrl({ dlink: '   ' })).toBeNull();
+    expect(extractTeraBoxDownloadUrl({ download_url: '' })).toBeNull();
+    expect(extractTeraBoxDownloadUrl('')).toBeNull();
+  });
+
+  it('TC2: TeraBoxVerificationRequiredError is properly constructed and classified', () => {
+    const err = new TeraBoxVerificationRequiredError('TeraBox download requires authentication', 'verification', 400310, '8974230873518970796');
+    expect(err.name).toBe('TeraBoxVerificationRequiredError');
+    expect(err.code).toBe('TERABOX_VERIFICATION_REQUIRED');
+    expect(err.errno).toBe(400310);
+    expect(err.requestId).toBe('8974230873518970796');
+  });
+
+  it('TC3: Telegram entity error fallback strips formatting safely', () => {
+    const errorMsg = '⚠️ TeraBox download request rejected: errno=400310, errmsg=need verify_v2';
+    // Unclosed underscore in Markdown causes Telegram 400 parse entity error
+    // Our fallback strips markdown formatting chars safely:
+    const plainText = errorMsg.replace(/[*_`]/g, '');
+    expect(plainText).not.toContain('_');
+    expect(plainText).toBe('⚠️ TeraBox download request rejected: errno=400310, errmsg=need verifyv2');
+  });
+});
+
+

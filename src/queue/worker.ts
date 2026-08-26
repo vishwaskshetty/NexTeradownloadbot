@@ -4,7 +4,7 @@ import { db } from '../db';
 import { jobService } from '../services/JobService';
 import { usageService } from '../services/UsageService';
 import { providerRegistry } from '../providers';
-import { ProviderError, ProviderAccessError } from '../providers/errors';
+import { ProviderError, ProviderAccessError, TeraBoxVerificationRequiredError } from '../providers/errors';
 import { logger } from '../utils/logger';
 import {
   validateDownloadedFile,
@@ -217,6 +217,16 @@ export const initWorker = () => {
           ...(keyboard || {})
         });
       } catch (err: any) {
+        if (err.message?.includes("can't parse entities") || err.message?.includes('entity')) {
+          try {
+            // Strip markdown formatting symbols and send as plain text
+            const plainText = text.replace(/[*_`]/g, '');
+            await bot.telegram.editMessageText(telegramId, statusMessageId, undefined, plainText, {
+              ...(keyboard || {})
+            });
+            return;
+          } catch (plainErr) {}
+        }
         if (!err.message?.includes('message is not modified') && !err.message?.includes('message to edit not found')) {
           logger.warn(`Could not edit status message ${statusMessageId}: ${err.message}`);
         }
@@ -395,7 +405,10 @@ export const initWorker = () => {
           const isDeterministic = 
             resolveErr.name === 'ProviderUnavailableError' || 
             resolveErr.name === 'InvalidUrlError' || 
-            resolveErr.name === 'NotFoundError';
+            resolveErr.name === 'NotFoundError' ||
+            resolveErr.name === 'TeraBoxVerificationRequiredError' ||
+            resolveErr.name === 'TeraBoxMissingContextError' ||
+            resolveErr.code === 'TERABOX_VERIFICATION_REQUIRED';
           
           if (isDeterministic || attempt >= maxRetries) {
             throw resolveErr;
@@ -649,6 +662,11 @@ export const initWorker = () => {
           `❌ *UPLOAD FAILED*\n\n` +
           `⚠️ The file could not be delivered to Telegram.\n\n` +
           `📊 Usage was not consumed.`;
+      } else if (error instanceof TeraBoxVerificationRequiredError || error.name === 'TeraBoxVerificationRequiredError' || error.code === 'TERABOX_VERIFICATION_REQUIRED') {
+        userMsg =
+          `⚠️ *TERABOX AUTHENTICATION REQUIRED*\n\n` +
+          `TeraBox requires an active account session (TERABOX_NDUS) or official API credentials (TERABOX_ACCESS_TOKEN) to download this file.\n\n` +
+          `Your daily download limit was NOT used.`;
       } else if (error instanceof ProviderAccessError) {
         userMsg =
           `⚠️ *${error.providerName.toUpperCase()} ACCESS UNAVAILABLE*\n\n` +

@@ -13,6 +13,7 @@ import {
   TeraBoxMissingContextError,
   TeraBoxProviderError,
   TeraBoxDownloadUrlError,
+  TeraBoxVerificationRequiredError,
 } from '../errors';
 import { logger } from '../../utils/logger';
 
@@ -78,12 +79,17 @@ export const TERABOX_DOMAINS = [
  * Diagnostic logger for candidate values without leaking secrets or full signed URLs
  */
 export function describeCandidate(name: string, value: unknown): void {
+  const isNonEmpty =
+    value !== undefined &&
+    value !== null &&
+    (typeof value !== 'string' || value.trim().length > 0);
+
   logger.info(
     `[TeraBox Debug] ${name}: ` +
       JSON.stringify({
-        exists: value !== undefined && value !== null,
+        exists: isNonEmpty,
         type: Array.isArray(value) ? 'array' : typeof value,
-        preview: typeof value === 'string' ? value.slice(0, 120) : undefined,
+        preview: typeof value === 'string' && value.trim().length > 0 ? value.slice(0, 120) : undefined,
         objectKeys:
           value && typeof value === 'object' && !Array.isArray(value)
             ? Object.keys(value as Record<string, unknown>)
@@ -726,6 +732,16 @@ export class TeraBoxResolver {
               dataKeys: downloadRes.data && typeof downloadRes.data === 'object' ? Object.keys(downloadRes.data) : undefined,
             })
         );
+
+        if (Number(downloadRes.errno) === 400310 || safeMsg.includes('verify_v2') || safeMsg.includes('need verify')) {
+          throw new TeraBoxVerificationRequiredError(
+            'TeraBox download requires an authenticated account session (TERABOX_NDUS) or official API credentials (TERABOX_ACCESS_TOKEN).',
+            'verification',
+            Number(downloadRes.errno),
+            String(requestId)
+          );
+        }
+
         throw new TeraBoxProviderError(
           `TeraBox download request rejected: errno=${downloadRes.errno}, errmsg=${safeMsg}`,
           'download',
