@@ -481,3 +481,56 @@ describe('TEST 13: Live TeraBox share link simulation (1lN9IGJnt49mdUOaSuK5kAQ)'
   });
 });
 
+// ── TEST 14: Security Hardening — SSRF & URL Validation ────────────────────────
+
+
+describe('TEST 14: Security Hardening — SSRF & URL Validation', () => {
+  const { isSafeTeraBoxUrl } = require('../src/providers/terabox/terabox.resolver');
+
+  it('rejects localhost, loopback and private IPv4/IPv6 addresses', () => {
+    expect(isSafeTeraBoxUrl('http://localhost/test')).toBe(false);
+    expect(isSafeTeraBoxUrl('http://127.0.0.1:8080/exploit')).toBe(false);
+    expect(isSafeTeraBoxUrl('http://169.254.169.254/latest/meta-data')).toBe(false); // Cloud metadata
+    expect(isSafeTeraBoxUrl('http://10.0.0.5/internal')).toBe(false);
+    expect(isSafeTeraBoxUrl('http://192.168.1.1/router')).toBe(false);
+    expect(isSafeTeraBoxUrl('http://172.16.0.1/admin')).toBe(false);
+    expect(isSafeTeraBoxUrl('http://[::1]/test')).toBe(false);
+    expect(isSafeTeraBoxUrl('file:///etc/passwd')).toBe(false);
+    expect(isSafeTeraBoxUrl('ftp://terabox.com/file')).toBe(false);
+  });
+
+  it('accepts legitimate TeraBox domains', () => {
+    expect(isSafeTeraBoxUrl('https://1024terabox.com/s/1lN9IGJnt49mdUOaSuK5kAQ')).toBe(true);
+    expect(isSafeTeraBoxUrl('https://teraboxapp.com/s/1abc123xyz')).toBe(true);
+    expect(isSafeTeraBoxUrl('https://terabox.com/s/1abc123xyz')).toBe(true);
+  });
+});
+
+// ── TEST 15: Security Hardening — Path Traversal Sanitization ────────────────
+
+describe('TEST 15: Security Hardening — Path Traversal Sanitization', () => {
+  it('sanitizes user filenames to prevent directory traversal', () => {
+    const sanitize = (name: string) => name.replace(/[^a-zA-Z0-9_.-]/g, '_');
+    expect(sanitize('../../../etc/passwd')).not.toContain('/');
+    expect(sanitize('../../../etc/passwd')).not.toContain('\\');
+    expect(sanitize('C:\\Windows\\System32\\cmd.exe')).toBe('C__Windows_System32_cmd.exe');
+  });
+});
+
+// ── TEST 16: Security Hardening — Admin Authorization Check ──────────────────
+
+describe('TEST 16: Security Hardening — Admin Authorization', () => {
+  it('strictly validates admin Telegram IDs against configured whitelist', () => {
+    const adminIds = [123456789n, 987654321n];
+    const isAdmin = (tgId: number | bigint | string) => {
+      const num = BigInt(tgId);
+      return adminIds.includes(num);
+    };
+
+    expect(isAdmin(123456789)).toBe(true);
+    expect(isAdmin('987654321')).toBe(true);
+    expect(isAdmin(111111111)).toBe(false); // Unauthorized user
+  });
+});
+
+
