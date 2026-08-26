@@ -675,8 +675,8 @@ export class TeraBoxResolver {
             timestamp: shareMetadata.timestamp,
             jsTokenPresent: Boolean(activeJsToken),
             cookieNames,
-            queryParams: ['app_id', 'web', 'channel', 'clienttype', ...(activeJsToken ? ['jsToken'] : []), 'shareid', 'sign', 'timestamp'],
-            bodyParams: ['product', 'nozip', 'fid_list', 'uk', 'primaryid', 'shareid', 'sign', 'timestamp'],
+            queryParams: ['app_id'],
+            bodyParams: ['product', 'nozip', 'fid_list', 'share_id', 'uk', 'sign', 'timestamp', 'primaryid'],
             targetHost: new URL(this.UNOFFICIAL_API_BASE).hostname,
             targetPath: '/share/download',
             httpMethod: 'POST',
@@ -687,19 +687,9 @@ export class TeraBoxResolver {
 
       logger.info(`[TeraBox] Stage 6: Requesting download URL for fs_id ${file.fs_id}`);
 
-      const downloadUrlObj = new URL(`${this.UNOFFICIAL_API_BASE}/share/download`);
-      downloadUrlObj.searchParams.set('app_id', '250528');
-      downloadUrlObj.searchParams.set('web', '1');
-      downloadUrlObj.searchParams.set('channel', 'dubox');
-      downloadUrlObj.searchParams.set('clienttype', '0');
-      if (activeJsToken) {
-        downloadUrlObj.searchParams.set('jsToken', activeJsToken);
-      }
-      downloadUrlObj.searchParams.set('shareid', String(shareMetadata.shareId));
-      downloadUrlObj.searchParams.set('sign', String(shareMetadata.sign));
-      downloadUrlObj.searchParams.set('timestamp', String(shareMetadata.timestamp));
+      const downloadEndpoint = `${this.UNOFFICIAL_API_BASE}/share/download?app_id=250528`;
 
-      const downloadRes = await this.safeFetch(downloadUrlObj.toString(), {
+      const downloadRes = await this.safeFetch(downloadEndpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
@@ -712,11 +702,11 @@ export class TeraBoxResolver {
           product: 'share',
           nozip: '0',
           fid_list: `[${file.fs_id}]`,
+          share_id: String(shareMetadata.shareId),
           uk: String(shareMetadata.uk),
-          primaryid: String(shareMetadata.shareId),
-          shareid: String(shareMetadata.shareId),
           sign: String(shareMetadata.sign),
           timestamp: String(shareMetadata.timestamp),
+          primaryid: String(shareMetadata.shareId),
         }).toString(),
       });
 
