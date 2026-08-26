@@ -231,6 +231,7 @@ const start = async () => {
 
       isBotRunning = true;
       logger.info('[Bot] Polling started: YES');
+      logger.info('[TeraBox] Resolver version: 1.0.0 (commit: 40a4872)');
       logger.info('🤖 NexTeraDownloadBot is online 24/7');
     }
 

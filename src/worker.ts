@@ -26,7 +26,7 @@ const startWorker = async () => {
     initBroadcastWorker();
     initCleanupWorker();
     logger.info('Workers initialized successfully');
-    
+    logger.info('[TeraBox] Resolver version: 1.0.0 (commit: 40a4872)');
     logger.info('🚀 Persistent Worker is running');
   } catch (error: any) {
     logger.error(`Failed to start persistent worker: ${error.message}`);
