@@ -254,7 +254,12 @@ export class TeraBoxResolver {
       } catch {}
     }
 
-    // Strategy 3: Unofficial TeraBox shorturlinfo
+    // Strategy 3: Unofficial TeraBox API (shorturlinfo & share/list)
+    let shareId: string | undefined;
+    let uk: string | undefined;
+    let sign: string | undefined;
+    let timestamp: number | undefined;
+
     if (fileList.length === 0) {
       const infoUrl = `${this.UNOFFICIAL_API_BASE}/api/shorturlinfo`;
       try {
@@ -264,6 +269,10 @@ export class TeraBoxResolver {
         });
         if (data && data.errno === 0 && Array.isArray(data.list)) {
           fileList = data.list;
+          shareId = String(data.shareid || data.share_id || '');
+          uk = String(data.uk || '');
+          sign = data.sign;
+          timestamp = data.timestamp;
         }
       } catch {}
 
@@ -276,6 +285,10 @@ export class TeraBoxResolver {
           });
           if (shareListData && shareListData.errno === 0 && Array.isArray(shareListData.list)) {
             fileList = shareListData.list;
+            shareId = String(shareListData.share_id || shareListData.shareid || '');
+            uk = String(shareListData.uk || '');
+            sign = shareListData.sign;
+            timestamp = shareListData.timestamp;
           }
         } catch {}
       }
@@ -291,6 +304,10 @@ export class TeraBoxResolver {
 
     const metadata: TeraBoxShareMetadata = {
       surl: shareCode,
+      shareId,
+      uk,
+      sign,
+      timestamp,
       fileList,
     };
 
@@ -353,6 +370,32 @@ export class TeraBoxResolver {
         selectedSource = c.source;
         break;
       }
+    }
+
+    if (!downloadUrl && shareMetadata.shareId && shareMetadata.uk) {
+      try {
+        const downloadRes = await this.safeFetch(`${this.UNOFFICIAL_API_BASE}/share/download?app_id=250528`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Referer': 'https://www.terabox.app/',
+            ...(config.TERABOX_NDUS ? { 'Cookie': `ndus=${config.TERABOX_NDUS}` } : {})
+          },
+          data: new URLSearchParams({
+            share_id: String(shareMetadata.shareId),
+            uk: String(shareMetadata.uk),
+            sign: shareMetadata.sign || '',
+            timestamp: String(shareMetadata.timestamp || Math.floor(Date.now() / 1000)),
+            fid_list: JSON.stringify([file.fs_id]),
+            primaryid: String(shareMetadata.shareId),
+          }).toString()
+        });
+        if (downloadRes && (downloadRes.dlink || downloadRes.list?.[0]?.dlink)) {
+          downloadUrl = downloadRes.dlink || downloadRes.list[0].dlink;
+          selectedSource = 'unofficial /share/download';
+        }
+      } catch {}
     }
 
     if (!downloadUrl && hasTeraBoxCredentials()) {
