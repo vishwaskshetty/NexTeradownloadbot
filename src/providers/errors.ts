@@ -137,5 +137,47 @@ export class TeraBoxLinkResolutionFailedError extends TeraBoxResolverError {
   }
 }
 
+export class TeraBoxGatewayNotConfiguredError extends TeraBoxResolverError {
+  constructor(message = 'TeraBox gateway is not configured (TERABOX_GATEWAY_URL is unset).', stage = 'gateway') {
+    super(message, stage, undefined, undefined, 'TERABOX_GATEWAY_NOT_CONFIGURED');
+    this.name = 'TeraBoxGatewayNotConfiguredError';
+  }
+}
+
+export class TeraBoxGatewayUnreachableError extends TeraBoxResolverError {
+  constructor(message = 'TeraBox gateway service is unreachable or timed out.', stage = 'gateway') {
+    super(message, stage, undefined, undefined, 'TERABOX_GATEWAY_UNREACHABLE');
+    this.name = 'TeraBoxGatewayUnreachableError';
+  }
+}
+
+export class TeraBoxGatewayAuthFailedError extends TeraBoxResolverError {
+  constructor(message = 'TeraBox gateway authentication failed.', stage = 'gateway', errno?: number, requestId?: string) {
+    super(message, stage, errno, requestId, 'TERABOX_GATEWAY_AUTH_FAILED');
+    this.name = 'TeraBoxGatewayAuthFailedError';
+  }
+}
+
+export class TeraBoxGatewayProviderFailedError extends TeraBoxResolverError {
+  constructor(message = 'TeraBox gateway reported provider failure.', stage = 'gateway', errno?: number, requestId?: string) {
+    super(message, stage, errno, requestId, 'TERABOX_GATEWAY_PROVIDER_FAILED');
+    this.name = 'TeraBoxGatewayProviderFailedError';
+  }
+}
+
+export class TeraBoxGatewayLinkNotFoundError extends TeraBoxResolverError {
+  constructor(message = 'TeraBox gateway succeeded but no download link was found.', stage = 'gateway') {
+    super(message, stage, undefined, undefined, 'TERABOX_GATEWAY_LINK_NOT_FOUND');
+    this.name = 'TeraBoxGatewayLinkNotFoundError';
+  }
+}
+
+export class TeraBoxGatewayInvalidResponseError extends TeraBoxResolverError {
+  constructor(message = 'TeraBox gateway returned an invalid or malformed response.', stage = 'gateway') {
+    super(message, stage, undefined, undefined, 'TERABOX_GATEWAY_INVALID_RESPONSE');
+    this.name = 'TeraBoxGatewayInvalidResponseError';
+  }
+}
+
 
 

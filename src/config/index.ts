@@ -37,6 +37,7 @@ const envSchema = z.object({
   TERABOX_REFRESH_TOKEN: z.string().optional(),
   TERABOX_NDUS: z.string().optional(),
   TERABOX_GATEWAY_URL: z.string().optional(),
+  TERABOX_GATEWAY_TIMEOUT_MS: z.coerce.number().default(15000),
   // Diskwala Official API credentials (optional)
   DISKWALA_API_KEY: z.string().optional(),
 });
@@ -66,6 +67,8 @@ if (isConfigNdus) {
   }
 }
 
+const isGatewayConfigured = typeof config.TERABOX_GATEWAY_URL === 'string' && config.TERABOX_GATEWAY_URL.trim().length > 0;
+
 if (process.env.NODE_ENV !== 'test') {
   console.log(`[Config] TERABOX_NDUS loaded: ${isConfigNdus ? 'YES' : 'NO'}`);
   console.log(`[TeraBox Auth] TERABOX_NDUS configured: ${isConfigNdus ? 'YES' : 'NO'}`);
@@ -75,6 +78,10 @@ if (process.env.NODE_ENV !== 'test') {
   console.log(`[TeraBox Auth] config.TERABOX_NDUS: ${isConfigNdus ? 'YES' : 'NO'}`);
   console.log(`[TeraBox Auth] Resolver NDUS: ${isConfigNdus ? 'YES' : 'NO'}`);
   console.log(`[TeraBox Auth] Configuration source: environment`);
+  console.log(`[TeraBox Gateway] Configured: ${isGatewayConfigured ? 'YES' : 'NO'}`);
+  if (isGatewayConfigured) {
+    console.log(`[TeraBox Gateway] URL valid: ${/^https?:\/\//i.test(config.TERABOX_GATEWAY_URL!.trim()) ? 'YES' : 'NO'}`);
+  }
 }
 
 

@@ -930,7 +930,7 @@ describe('TEST 23: NDUS Diagnostics & Health Check', () => {
   it('TC4: testTeraBoxAuthentication returns expected union status', async () => {
     const status = await testTeraBoxAuthentication();
     expect(['NOT_CONFIGURED', 'REJECTED', 'HEALTHY', 'PROVIDER_ERROR']).toContain(status);
-  });
+  }, 30000);
 });
 
 

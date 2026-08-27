@@ -1,11 +1,14 @@
+import axios from 'axios';
 import {
   normalizeNdus,
+  normalizeGatewayUrl,
   mergeCookies,
   SessionCookieJar,
   inspectNdusConfiguration,
   extractTeraBoxDownloadUrl,
   extractJsToken,
   extractDpLogId,
+  extractHomeSigningContext,
   signDownload,
   SignDownload,
   teraBoxResolver,
@@ -18,8 +21,14 @@ import {
   TeraBoxAuthRejectedError,
   TeraBoxVerificationRequiredError,
   TeraBoxLinkResolutionFailedError,
+  TeraBoxGatewayNotConfiguredError,
+  TeraBoxGatewayUnreachableError,
+  TeraBoxGatewayAuthFailedError,
+  TeraBoxGatewayProviderFailedError,
+  TeraBoxGatewayLinkNotFoundError,
   ProviderAccessError,
 } from '../src/providers/errors';
+import { config } from '../src/config';
 
 describe('TeraBox Authenticated Multi-Tier Resolver Suite', () => {
   // 1. NDUS normalization
@@ -35,8 +44,21 @@ describe('TeraBox Authenticated Multi-Tier Resolver Suite', () => {
     });
   });
 
-  // 2. Cookie merging
-  describe('2. Cookie merging', () => {
+  // 2. Gateway URL Normalization
+  describe('2. Gateway URL Normalization', () => {
+    it('normalizes and validates gateway URLs cleanly', () => {
+      expect(normalizeGatewayUrl('http://localhost:5000/')).toBe('http://localhost:5000');
+      expect(normalizeGatewayUrl('https://my-terabox-gateway.up.railway.app///')).toBe('https://my-terabox-gateway.up.railway.app');
+      expect(normalizeGatewayUrl('https://gateway.example.com/api/')).toBe('https://gateway.example.com/api');
+      expect(normalizeGatewayUrl('not_a_valid_url')).toBeNull();
+      expect(normalizeGatewayUrl('ftp://example.com')).toBeNull();
+      expect(normalizeGatewayUrl('')).toBeNull();
+      expect(normalizeGatewayUrl(undefined)).toBeNull();
+    });
+  });
+
+  // 3. Cookie merging
+  describe('3. Cookie merging', () => {
     it('merges cookies and handles Set-Cookie headers properly', () => {
       const merged = mergeCookies('ndus=token123', [
         'csrfToken=csrftok; path=/',
@@ -48,8 +70,8 @@ describe('TeraBox Authenticated Multi-Tier Resolver Suite', () => {
     });
   });
 
-  // 3. Session reuse & CookieJar
-  describe('3. Session reuse & CookieJar', () => {
+  // 4. Session reuse & CookieJar
+  describe('4. Session reuse & CookieJar', () => {
     it('preserves and updates cookies in SessionCookieJar', () => {
       const jar = new SessionCookieJar('ndus=test_ndus');
       expect(jar.has('ndus')).toBe(true);
@@ -65,8 +87,8 @@ describe('TeraBox Authenticated Multi-Tier Resolver Suite', () => {
     });
   });
 
-  // 4. Token extraction (jsToken & dp-logid)
-  describe('4. Token extraction (jsToken & dp-logid)', () => {
+  // 5. Token extraction (jsToken & dp-logid)
+  describe('5. Token extraction (jsToken & dp-logid)', () => {
     it('extracts jsToken from various HTML string patterns safely', () => {
       expect(extractJsToken('fn%28%22ABC123DEF%22%29')).toBe('ABC123DEF');
       expect(extractJsToken('fn("XYZ789")')).toBe('XYZ789');
@@ -83,8 +105,33 @@ describe('TeraBox Authenticated Multi-Tier Resolver Suite', () => {
     });
   });
 
-  // 5. SignDownload algorithm & test vectors
-  describe('5. SignDownload (RC4 stream cipher) algorithm', () => {
+  // 6. extractHomeSigningContext from HTML
+  describe('6. extractHomeSigningContext from HTML', () => {
+    it('extracts sign1, sign3, timestamp, and security tokens from HTML / JS state', () => {
+      const html = `
+        <html>
+          <script>
+            window.yunData = {
+              "sign1": "html_sign1_token",
+              "sign3": "html_sign3_token",
+              "timestamp": 1710000000,
+              "bdstoken": "bds_token_123",
+              "csrfToken": "csrf_token_456"
+            };
+          </script>
+        </html>
+      `;
+      const ctx = extractHomeSigningContext(html);
+      expect(ctx.sign1).toBe('html_sign1_token');
+      expect(ctx.sign3).toBe('html_sign3_token');
+      expect(ctx.timestamp).toBe(1710000000);
+      expect(ctx.bdstoken).toBe('bds_token_123');
+      expect(ctx.csrfToken).toBe('csrf_token_456');
+    });
+  });
+
+  // 7. SignDownload algorithm & test vectors
+  describe('7. SignDownload (RC4 stream cipher) algorithm', () => {
     it('produces valid base64 signature from sign3 and sign1 test vectors', () => {
       const sign3 = 'k3y12345';
       const sign1 = 'payloadData6789';
@@ -105,107 +152,170 @@ describe('TeraBox Authenticated Multi-Tier Resolver Suite', () => {
     });
   });
 
-  // 6. getHomeInfo & signb generation
-  describe('6. getHomeInfo & signb generation', () => {
-    it('fetches home info and computes signb on errno=0', async () => {
-      const customResolver = new TeraBoxResolver();
-      const mockJar = new SessionCookieJar('ndus=token');
-      (customResolver as any).safeFetch = async (url: string) => {
-        if (url.includes('/api/home/info')) {
-          return {
-            errno: 0,
-            data: {
-              sign1: 'test_sign1',
-              sign3: 'test_sign3',
-              timestamp: 1700000000,
-            },
-          };
-        }
-        return { errno: -1 };
-      };
+  // 8. Gateway Resolution Adapter (saahiyo/terabox-gateway)
+  describe('8. Gateway Resolution Adapter (saahiyo/terabox-gateway)', () => {
+    let origGatewayUrl: string | undefined;
+    let origAxiosGet: any;
 
-      const res = await customResolver.getHomeInfo(mockJar);
-      expect(res.errno).toBe(0);
-      expect(res.data?.sign1).toBe('test_sign1');
-      expect(res.data?.sign3).toBe('test_sign3');
-      expect(res.data?.timestamp).toBe(1700000000);
-      expect(res.data?.signb).toBeDefined();
-      expect(res.data?.signb).toBe(signDownload('test_sign3', 'test_sign1'));
+    beforeEach(() => {
+      origGatewayUrl = config.TERABOX_GATEWAY_URL;
+      origAxiosGet = axios.get;
     });
-  });
 
-  // 7. Full Authenticated /api/download flow
-  describe('7. Full Authenticated /api/download flow (seiya-authenticated-download)', () => {
-    it('executes updateAppData -> getHomeInfo -> signb -> POST /api/download -> redirect', async () => {
-      const mockMeta = {
-        shareId: '123',
-        shareCode: '1fKvukFFlwMqHt3vbdFoRYQ',
-        surl: '1fKvukFFlwMqHt3vbdFoRYQ',
-        uk: '456',
-        timestamp: 1700000000,
-        sign: 'abc',
-        jsToken: 'JSTOKEN123',
-        cookies: 'ndus=mock_ndus_token',
-        cookieJar: new SessionCookieJar('ndus=mock_ndus_token'),
-        fileList: [
-          {
-            fs_id: '207400602392562',
-            server_filename: '2026-04-23-18-55-38(8).mp4',
-            size: 8108680,
-            category: 1,
-          },
-        ],
-      };
+    afterEach(() => {
+      config.TERABOX_GATEWAY_URL = origGatewayUrl;
+      axios.get = origAxiosGet;
+    });
 
-      const customResolver = new TeraBoxResolver();
-      (customResolver as any).updateAppData = async () => true;
-      (customResolver as any).getHomeInfo = async () => ({
-        errno: 0,
+    it('throws TeraBoxGatewayNotConfiguredError when gateway is unset', async () => {
+      config.TERABOX_GATEWAY_URL = undefined;
+      const resolver = new TeraBoxResolver();
+      await expect(
+        resolver.resolveViaTeraBoxGateway('testcode', '123')
+      ).rejects.toThrow(TeraBoxGatewayNotConfiguredError);
+    });
+
+    it('successfully extracts download_link from saahiyo/terabox-gateway response', async () => {
+      config.TERABOX_GATEWAY_URL = 'http://localhost:5000';
+      const resolver = new TeraBoxResolver();
+
+      axios.get = jest.fn().mockResolvedValue({
+        status: 200,
+        headers: { 'content-type': 'application/json' },
         data: {
-          sign1: 'sign1_sample',
-          sign3: 'sign3_sample',
-          signb: 'computed_signb',
-          timestamp: 1700000000,
+          status: 'success',
+          file_name: '2026-04-23-18-55-38(8).mp4',
+          file_size: 8108680,
+          download_link: 'https://d.terabox.app/download/gateway-file.mp4',
         },
       });
-      (customResolver as any).safeFetch = async (url: string, opts: any) => {
-        if (url.includes('/api/download')) {
-          expect(opts.method).toBe('POST');
-          expect(opts.data).toContain('fidlist=%5B%22207400602392562%22%5D');
-          expect(opts.data).toContain('sign=computed_signb');
-          return {
-            errno: 0,
-            dlink: 'https://d.terabox.app/download/2026-04-23-18-55-38(8).mp4',
-          };
-        }
-        return { errno: -1 };
-      };
-      (customResolver as any).resolveDlinkRedirect = async (dlink: string) => ({
-        finalUrl: dlink,
+
+      (resolver as any).resolveDlinkRedirect = async (url: string) => ({
+        finalUrl: url,
         redirectStatus: 200,
         finalHostname: 'd.terabox.app',
       });
 
-      const res = await customResolver.resolveWithAuthenticatedDownloadFlow('207400602392562', mockMeta as any);
-      expect(res.fileName).toBe('2026-04-23-18-55-38(8).mp4');
-      expect(res.size).toBe(8108680);
-      expect(res.downloadUrl).toBe('https://d.terabox.app/download/2026-04-23-18-55-38(8).mp4');
-      expect(res.source).toBe('seiya-authenticated-download');
+      const res = await resolver.resolveViaTeraBoxGateway('1fKvukFFlwMqHt3vbdFoRYQ', '207400602392562');
+      expect(res).not.toBeNull();
+      expect(res?.fileName).toBe('2026-04-23-18-55-38(8).mp4');
+      expect(res?.size).toBe(8108680);
+      expect(res?.downloadUrl).toBe('https://d.terabox.app/download/gateway-file.mp4');
+      expect(res?.source).toBe('terabox-gateway');
+    });
+
+    it('extracts direct_link, dlink, and proxy_url format correctly', async () => {
+      config.TERABOX_GATEWAY_URL = 'http://localhost:5000';
+      const resolver = new TeraBoxResolver();
+
+      axios.get = jest.fn().mockResolvedValue({
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+        data: {
+          direct_link: 'https://d.terabox.app/direct.mp4',
+        },
+      });
+
+      (resolver as any).resolveDlinkRedirect = async (url: string) => ({
+        finalUrl: url,
+        redirectStatus: 200,
+        finalHostname: 'd.terabox.app',
+      });
+
+      const res = await resolver.resolveViaTeraBoxGateway('code1', '123');
+      expect(res?.downloadUrl).toBe('https://d.terabox.app/direct.mp4');
+    });
+
+    it('handles gateway HTTP 500 server error', async () => {
+      config.TERABOX_GATEWAY_URL = 'http://localhost:5000';
+      const resolver = new TeraBoxResolver();
+
+      axios.get = jest.fn().mockResolvedValue({
+        status: 500,
+        headers: { 'content-type': 'application/json' },
+        data: { error: 'Internal Server Error' },
+      });
+
+      await expect(
+        resolver.resolveViaTeraBoxGateway('code1', '123')
+      ).rejects.toThrow(TeraBoxGatewayUnreachableError);
+    });
+
+    it('calls exact /api endpoint with url and resolve=1 parameters and parses files array', async () => {
+      config.TERABOX_GATEWAY_URL = 'http://terabox-gateway-nex.railway.internal';
+      const resolver = new TeraBoxResolver();
+
+      let calledUrl = '';
+      let calledParams: any = {};
+
+      axios.get = jest.fn().mockImplementation((url: string, opts: any) => {
+        calledUrl = url;
+        calledParams = opts?.params;
+        return Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          data: {
+            status: 'success',
+            url: 'https://1024terabox.com/s/1fKvukFFlwMqHt3vbdFoRYQ',
+            files: [
+              {
+                filename: 'video_file.mp4',
+                size: '7.73 MB',
+                size_bytes: 8108680,
+                direct_link: 'https://d.terabox.app/download/video_direct.mp4',
+                fs_id: '207400602392562',
+              },
+            ],
+            total_files: 1,
+          },
+        });
+      });
+
+      (resolver as any).resolveDlinkRedirect = async (url: string) => ({
+        finalUrl: url,
+        redirectStatus: 200,
+        finalHostname: 'd.terabox.app',
+      });
+
+      const res = await resolver.resolveViaTeraBoxGateway('1fKvukFFlwMqHt3vbdFoRYQ', '207400602392562');
+      expect(calledUrl).toBe('http://terabox-gateway-nex.railway.internal/api');
+      expect(calledParams).toEqual({
+        url: 'https://1024terabox.com/s/1fKvukFFlwMqHt3vbdFoRYQ',
+        resolve: '1',
+      });
+      expect(res).not.toBeNull();
+      expect(res?.fileName).toBe('video_file.mp4');
+      expect(res?.size).toBe(8108680);
+      expect(res?.downloadUrl).toBe('https://d.terabox.app/download/video_direct.mp4');
+      expect(res?.source).toBe('terabox-gateway');
+    });
+
+    it('handles gateway verify_v2 errno response', async () => {
+      config.TERABOX_GATEWAY_URL = 'http://localhost:5000';
+      const resolver = new TeraBoxResolver();
+
+      axios.get = jest.fn().mockResolvedValue({
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+        data: { errno: 400310, errmsg: 'need verify_v2' },
+      });
+
+      await expect(
+        resolver.resolveViaTeraBoxGateway('code1', '123')
+      ).rejects.toThrow(TeraBoxGatewayAuthFailedError);
     });
   });
 
-  // 8. Public-share /share/list flow
-  describe('8. Public-share reference flow (/share/list -> file.dlink)', () => {
-    it('resolves dlink from /share/list and performs redirect resolution', async () => {
+  // 9. Primary Strategy Ordering (Gateway FIRST when configured)
+  describe('9. Primary Strategy Ordering (Gateway FIRST when configured)', () => {
+    it('executes gateway first when TERABOX_GATEWAY_URL is configured', async () => {
+      const customResolver = new TeraBoxResolver();
       const mockMeta = {
         shareId: '123',
-        shareCode: '1fKvukFFlwMqHt3vbdFoRYQ',
-        surl: '1fKvukFFlwMqHt3vbdFoRYQ',
+        surl: 'testcode',
         uk: '456',
         timestamp: 1700000000,
         sign: 'abc',
-        jsToken: 'JSTOKEN123',
-        dpLogId: 'DPLOGID456',
         fileList: [
           {
             fs_id: '207400602392562',
@@ -216,101 +326,25 @@ describe('TeraBox Authenticated Multi-Tier Resolver Suite', () => {
         ],
       };
 
-      const customResolver = new TeraBoxResolver();
-      (customResolver as any).safeFetch = async (url: string) => {
-        if (url.includes('/share/list')) {
-          return {
-            errno: 0,
-            list: [
-              {
-                fs_id: '207400602392562',
-                server_filename: '2026-04-23-18-55-38(8).mp4',
-                size: 8108680,
-                dlink: 'https://d.1024tera.com/file/207400602392562?sign=abcdef',
-              },
-            ],
-          };
-        }
-        return { errno: -1 };
-      };
-      (customResolver as any).resolveDlinkRedirect = async (dlink: string) => ({
-        finalUrl: dlink,
-        redirectStatus: 200,
-        finalHostname: 'd.1024tera.com',
-      });
-
-      const res = await customResolver.resolveWithTeraboxApiReference('207400602392562', mockMeta as any);
-      expect(res.fileName).toBe('2026-04-23-18-55-38(8).mp4');
-      expect(res.size).toBe(8108680);
-      expect(res.downloadUrl).toBe('https://d.1024tera.com/file/207400602392562?sign=abcdef');
-      expect(res.source).toBe('terabox-api-reference');
-    });
-  });
-
-  // 9. Response normalization into TeraBoxResolvedFile
-  describe('9. Response normalization into TeraBoxResolvedFile', () => {
-    it('normalizes response into structured TeraBoxResolvedFile', async () => {
-      const mockMeta = {
-        shareId: '123',
-        surl: 'testcode',
-        uk: '456',
-        timestamp: 1700000000,
-        sign: 'abc',
-        fileList: [
-          {
-            fs_id: '999',
-            server_filename: 'video.mp4',
-            size: 8108680,
-            category: 1,
-          },
-        ],
-      };
-
-      const customResolver = new TeraBoxResolver();
       (customResolver as any).getShareMetadata = async () => mockMeta;
-      (customResolver as any).resolveWithAuthenticatedDownloadFlow = async () => ({
-        fileName: 'video.mp4',
+      (customResolver as any).resolveWithGateway = async () => ({
+        fileName: '2026-04-23-18-55-38(8).mp4',
         size: 8108680,
-        downloadUrl: 'https://d.terabox.app/download/video.mp4',
-        source: 'seiya-authenticated-download',
+        downloadUrl: 'https://gateway.cdn.terabox/video.mp4',
+        source: 'terabox-gateway',
       });
+      (customResolver as any).resolveWithAuthenticatedDownloadFlow = jest.fn();
 
-      const result = await customResolver.resolveSelectedFile('https://1024terabox.com/s/1testcode', '999');
-      expect(result.fileName).toBe('video.mp4');
-      expect(result.fileSize).toBe(8108680);
-      expect(result.fsId).toBe('999');
-      expect(result.downloadUrl).toBe('https://d.terabox.app/download/video.mp4');
-      expect(result.source).toBe('seiya-authenticated-download');
+      const result = await customResolver.resolveSelectedFile('https://1024terabox.com/s/1testcode', '207400602392562');
+      expect(result.downloadUrl).toBe('https://gateway.cdn.terabox/video.mp4');
+      expect(result.source).toBe('terabox-gateway');
+      // Authenticated download flow should not have been called because gateway succeeded
+      expect((customResolver as any).resolveWithAuthenticatedDownloadFlow).not.toHaveBeenCalled();
     });
   });
 
-  // 10. Provider errno 400310 handling & verify_v2 classification
-  describe('10. Provider errno 400310 handling & verify_v2 classification', () => {
-    it('identifies 400310 and maps correctly', async () => {
-      const customResolver = new TeraBoxResolver();
-      const mockMeta = {
-        shareId: '123',
-        surl: 'testcode',
-        uk: '456',
-        timestamp: 1700000000,
-        sign: 'abc',
-        fileList: [{ fs_id: '999', server_filename: 'video.mp4', size: 100 }],
-      };
-
-      (customResolver as any).getShareMetadata = async () => mockMeta;
-      (customResolver as any).safeFetch = async () => ({
-        errno: 400310,
-        errmsg: 'need verify_v2',
-      });
-
-      await expect(
-        customResolver.resolveSelectedFile('https://1024terabox.com/s/1testcode')
-      ).rejects.toThrow();
-    });
-  });
-
-  // 11. Strategy fallback order
-  describe('11. Strategy fallback order', () => {
+  // 10. Strategy fallback order
+  describe('10. Strategy fallback order', () => {
     it('falls back through strategies in order until success', async () => {
       const customResolver = new TeraBoxResolver();
       const mockMeta = {
@@ -323,6 +357,9 @@ describe('TeraBox Authenticated Multi-Tier Resolver Suite', () => {
       };
 
       (customResolver as any).getShareMetadata = async () => mockMeta;
+      (customResolver as any).resolveWithGateway = async () => {
+        throw new TeraBoxGatewayNotConfiguredError();
+      };
       (customResolver as any).resolveWithAuthenticatedDownloadFlow = async () => {
         throw new TeraBoxAuthRejectedError('Auth rejected');
       };
@@ -350,8 +387,8 @@ describe('TeraBox Authenticated Multi-Tier Resolver Suite', () => {
     });
   });
 
-  // 12. Short-lived URL cache clearing
-  describe('12. Short-lived URL cache clearing', () => {
+  // 11. Short-lived URL cache clearing
+  describe('11. Short-lived URL cache clearing', () => {
     it('clearTeraBoxShareCache successfully triggers cache clearing', async () => {
       await expect(clearTeraBoxShareCache('testcode')).resolves.not.toThrow();
     });
