@@ -690,10 +690,17 @@ export const initWorker = () => {
           `⚠️ *TERABOX RESOLUTION FAILED*\n\n` +
           `TeraBox metadata was resolved, but no direct download URL was returned.\n\n` +
           `Your daily download limit was NOT used.`;
-      } else if (error instanceof TeraBoxVerificationRequiredError || error.name === 'TeraBoxVerificationRequiredError' || error.code === 'TERABOX_VERIFICATION_REQUIRED') {
+      } else if (
+        error instanceof TeraBoxVerificationRequiredError ||
+        error.name === 'TeraBoxVerificationRequiredError' ||
+        error.code === 'TERABOX_VERIFICATION_REQUIRED' ||
+        error.name === 'TeraBoxGatewayAuthFailedError' ||
+        error.message?.includes('requires verification')
+      ) {
         userMsg =
-          `⚠️ *TERABOX AUTHENTICATION REQUIRED*\n\n` +
-          `TeraBox requires an active account session (TERABOX_NDUS) or official API credentials (TERABOX_ACCESS_TOKEN) to download this file.\n\n` +
+          `⚠️ *TERABOX VERIFICATION REQUIRED*\n\n` +
+          `TeraBox requires browser verification before this file can be resolved.\n\n` +
+          `Direct download URLs for this link are protected by provider anti-bot verification.\n` +
           `Your daily download limit was NOT used.`;
       } else if (error instanceof ProviderAccessError) {
         userMsg =
