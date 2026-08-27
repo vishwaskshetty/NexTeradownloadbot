@@ -179,5 +179,38 @@ export class TeraBoxGatewayInvalidResponseError extends TeraBoxResolverError {
   }
 }
 
+export class TeraBoxGatewayVerificationSessionError extends TeraBoxResolverError {
+  constructor(
+    public readonly sessionId: string,
+    public readonly verificationUrl: string,
+    message = 'TeraBox provider verification required. Complete manual verification at the provided URL.',
+    stage = 'verification',
+    errno = 400310
+  ) {
+    super(message, stage, errno, sessionId, 'TERABOX_GATEWAY_VERIFICATION_REQUIRED');
+    this.name = 'TeraBoxGatewayVerificationSessionError';
+  }
+}
+
+export class TeraBoxGatewaySessionExpiredError extends TeraBoxResolverError {
+  constructor(
+    message = 'The verification session has expired. Please try downloading the link again.',
+    stage = 'verification'
+  ) {
+    super(message, stage, 410, undefined, 'TERABOX_GATEWAY_SESSION_EXPIRED');
+    this.name = 'TeraBoxGatewaySessionExpiredError';
+  }
+}
+
+export class TeraBoxGatewayVerificationFailedError extends TeraBoxResolverError {
+  constructor(
+    message = 'TeraBox verification failed. Please try downloading the link again.',
+    stage = 'verification'
+  ) {
+    super(message, stage, 400, undefined, 'TERABOX_GATEWAY_VERIFICATION_FAILED');
+    this.name = 'TeraBoxGatewayVerificationFailedError';
+  }
+}
+
 
 

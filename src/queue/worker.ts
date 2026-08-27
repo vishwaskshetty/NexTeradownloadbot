@@ -11,6 +11,9 @@ import {
   TeraBoxAuthRequiredError,
   TeraBoxAuthRejectedError,
   TeraBoxLinkResolutionFailedError,
+  TeraBoxGatewaySessionExpiredError,
+  TeraBoxGatewayVerificationFailedError,
+  TeraBoxGatewayVerificationSessionError,
 } from '../providers/errors';
 import { logger } from '../utils/logger';
 import {
@@ -19,7 +22,11 @@ import {
   formatBytes,
   ValidationResult,
 } from '../utils/downloadValidator';
-import { clearTeraBoxShareCache, extractShareCode } from '../providers/terabox/terabox.resolver';
+import {
+  clearTeraBoxShareCache,
+  extractShareCode,
+  TeraBoxVerificationSessionInfo,
+} from '../providers/terabox/terabox.resolver';
 import { bot } from '../bot';
 import { config } from '../config';
 import axios from 'axios';
@@ -401,11 +408,38 @@ export const initWorker = () => {
           await clearTeraBoxShareCache(shareCode);
         }
 
+        // Setup user verification callback for manual verification session
+        const onVerificationRequired = async (info: TeraBoxVerificationSessionInfo) => {
+          logger.info(`[TeraBox Verification] session_created`);
+          logger.info(`[TeraBox Verification] waiting_for_user`);
+
+          const verificationMsg =
+            `⚠️ *TeraBox verification required*\n\n` +
+            `TeraBox requires a browser verification before the direct download can be generated.\n\n` +
+            `Open the verification page below and complete the verification manually.\n\n` +
+            `⏳ _Waiting for verification (up to 10 minutes)..._`;
+
+          const keyboard = {
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    text: '🔐 Complete TeraBox Verification',
+                    url: info.verificationUrl,
+                  },
+                ],
+              ],
+            },
+          };
+
+          await updateStatusMessage(verificationMsg, keyboard);
+        };
+
         // Resolve a completely fresh direct download URL from TeraBox
         const adapterInstance = adapter as any;
         try {
           resolvedFile = typeof adapterInstance.resolveSelectedFile === 'function'
-            ? await adapterInstance.resolveSelectedFile(url, fsId)
+            ? await adapterInstance.resolveSelectedFile(url, fsId, { onVerificationRequired })
             : await adapter.resolve(url);
         } catch (resolveErr: any) {
           logger.error(`[Download] Attempt ${attempt}: Failed to resolve URL — ${resolveErr.message}`);
@@ -418,10 +452,16 @@ export const initWorker = () => {
             resolveErr.name === 'TeraBoxAuthRejectedError' ||
             resolveErr.name === 'TeraBoxLinkResolutionFailedError' ||
             resolveErr.name === 'TeraBoxMissingContextError' ||
+            resolveErr.name === 'TeraBoxGatewaySessionExpiredError' ||
+            resolveErr.name === 'TeraBoxGatewayVerificationFailedError' ||
+            resolveErr.name === 'TeraBoxGatewayVerificationSessionError' ||
             resolveErr.code === 'TERABOX_VERIFICATION_REQUIRED' ||
             resolveErr.code === 'TERABOX_AUTH_REQUIRED' ||
             resolveErr.code === 'TERABOX_AUTH_REJECTED' ||
-            resolveErr.code === 'TERABOX_LINK_RESOLUTION_FAILED';
+            resolveErr.code === 'TERABOX_LINK_RESOLUTION_FAILED' ||
+            resolveErr.code === 'TERABOX_GATEWAY_SESSION_EXPIRED' ||
+            resolveErr.code === 'TERABOX_GATEWAY_VERIFICATION_FAILED' ||
+            resolveErr.code === 'TERABOX_GATEWAY_VERIFICATION_REQUIRED';
           
           if (isDeterministic || attempt >= maxRetries) {
             throw resolveErr;
@@ -685,12 +725,25 @@ export const initWorker = () => {
           `⚠️ *TERABOX AUTHENTICATION REJECTED*\n\n` +
           `TeraBox rejected the configured account session (TERABOX_NDUS expired or invalid).\n\n` +
           `Your daily download limit was NOT used.`;
+      } else if (error instanceof TeraBoxGatewaySessionExpiredError || error.code === 'TERABOX_GATEWAY_SESSION_EXPIRED') {
+        userMsg =
+          `⚠️ *TERABOX VERIFICATION EXPIRED*\n\n` +
+          `The verification session has expired or was not completed in time.\n` +
+          `Please send your link again to start a new verification session.\n\n` +
+          `Your daily download limit was NOT used.`;
+      } else if (error instanceof TeraBoxGatewayVerificationFailedError || error.code === 'TERABOX_GATEWAY_VERIFICATION_FAILED') {
+        userMsg =
+          `⚠️ *TERABOX VERIFICATION FAILED*\n\n` +
+          `Manual verification could not be confirmed by TeraBox.\n` +
+          `Please try sending your link again.\n\n` +
+          `Your daily download limit was NOT used.`;
       } else if (error instanceof TeraBoxLinkResolutionFailedError || error.code === 'TERABOX_LINK_RESOLUTION_FAILED') {
         userMsg =
           `⚠️ *TERABOX RESOLUTION FAILED*\n\n` +
           `TeraBox metadata was resolved, but no direct download URL was returned.\n\n` +
           `Your daily download limit was NOT used.`;
       } else if (
+        error instanceof TeraBoxGatewayVerificationSessionError ||
         error instanceof TeraBoxVerificationRequiredError ||
         error.name === 'TeraBoxVerificationRequiredError' ||
         error.code === 'TERABOX_VERIFICATION_REQUIRED' ||

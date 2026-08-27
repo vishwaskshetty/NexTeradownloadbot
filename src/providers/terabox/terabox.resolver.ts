@@ -23,6 +23,9 @@ import {
   TeraBoxGatewayProviderFailedError,
   TeraBoxGatewayLinkNotFoundError,
   TeraBoxGatewayInvalidResponseError,
+  TeraBoxGatewayVerificationSessionError,
+  TeraBoxGatewaySessionExpiredError,
+  TeraBoxGatewayVerificationFailedError,
 } from '../errors';
 import { logger } from '../../utils/logger';
 
@@ -38,31 +41,35 @@ export function normalizeNdus(rawNdus?: string): string | null {
   if (!trimmed) return null;
 
   // Strip wrapping outer quotes
-  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
     trimmed = trimmed.slice(1, -1).trim();
   }
 
-  // Strip leading 'Cookie:' header prefix
-  trimmed = trimmed.replace(/^Cookie:\s*/i, '').trim();
-
-  // Match ndus=<value> pattern
-  const match = trimmed.match(/(?:^|;\s*|\b)ndus\s*=\s*([^;]+)/i);
-  let val = match ? match[1].trim() : trimmed;
-
-  // Strip quotes around matched token if present
-  if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-    val = val.slice(1, -1).trim();
+  // If passed as full header "Cookie: ndus=..." or "cookie: ndus=..."
+  if (/^cookie:\s*/i.test(trimmed)) {
+    trimmed = trimmed.replace(/^cookie:\s*/i, '').trim();
   }
 
-  return val.length > 0 ? val : null;
+  // If passed as key=value format "ndus=..."
+  const ndusMatch = trimmed.match(/(?:^|;\s*|)ndus\s*=\s*(?:"([^"]*)"|'([^']*)'|([^;,\s]+))/i);
+  if (ndusMatch) {
+    let val = (ndusMatch[1] ?? ndusMatch[2] ?? ndusMatch[3] ?? '').trim();
+    val = val.replace(/^["']+|["']+$/g, '').trim();
+    return val.length > 0 ? val : null;
+  }
+
+  // If bare token
+  const bareToken = trimmed.replace(/^["']+|["']+$/g, '').trim();
+  if (/^[a-zA-Z0-9_-]{5,}$/.test(bareToken)) {
+    return bareToken;
+  }
+
+  return null;
 }
 
-/**
- * Normalizes TERABOX_GATEWAY_URL safely:
- * - strips trailing slashes
- * - validates http:// or https:// protocol
- * - ensures valid URL syntax
- */
 export function normalizeGatewayUrl(rawUrl?: string): string | null {
   if (!rawUrl || typeof rawUrl !== 'string') return null;
   const trimmed = rawUrl.trim().replace(/\/+$/, '');
@@ -80,6 +87,13 @@ export function normalizeGatewayUrl(rawUrl?: string): string | null {
   } catch {
     return null;
   }
+}
+
+export interface TeraBoxVerificationSessionInfo {
+  sessionId: string;
+  verificationUrl: string;
+  shareCode?: string;
+  fsId?: string;
 }
 
 export interface NdusDiagnostic {
@@ -544,6 +558,33 @@ export function extractTeraBoxDownloadUrl(input: unknown): string | null {
     try {
       const parsed = new URL(cleaned);
       if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        const pathLower = parsed.pathname.toLowerCase();
+        const hostLower = parsed.hostname.toLowerCase();
+
+        // Reject share URLs
+        if (pathLower.startsWith('/s/') || pathLower.startsWith('/sharing/link')) {
+          return null;
+        }
+        // Reject verification URLs & challenge paths
+        if (
+          pathLower.includes('/verify') ||
+          pathLower.includes('/verification') ||
+          pathLower.includes('verify_v2') ||
+          pathLower.includes('/checkcaptcha')
+        ) {
+          return null;
+        }
+        // Reject login & passport pages
+        if (
+          pathLower.includes('/login') ||
+          pathLower.includes('/signin') ||
+          pathLower.includes('/signup') ||
+          hostLower.includes('passport.terabox') ||
+          hostLower.includes('passport.baidu')
+        ) {
+          return null;
+        }
+
         return parsed.toString();
       }
     } catch {
@@ -1833,12 +1874,144 @@ export class TeraBoxResolver {
   }
 
   /**
+   * Polls the gateway verification session until completed, failed, or expired.
+   */
+  async pollGatewayVerificationSession(
+    sessionId: string,
+    timeoutMs = 600000, // 10 minutes
+    pollIntervalMs = 2500,
+    onStatusUpdate?: (status: string) => Promise<void>
+  ): Promise<{ status: string; data?: any }> {
+    const normalizedGwUrl = normalizeGatewayUrl(config.TERABOX_GATEWAY_URL);
+    if (!normalizedGwUrl) {
+      throw new TeraBoxGatewayNotConfiguredError();
+    }
+
+    const startTime = Date.now();
+    logger.info(`[TeraBox Verification] session_created`);
+    logger.info(`[TeraBox Verification] waiting_for_user`);
+
+    while (Date.now() - startTime < timeoutMs) {
+      logger.info(`[TeraBox Verification] polling_status`);
+
+      try {
+        const resp = await axios.get(
+          `${normalizedGwUrl}/api/verification/session/${encodeURIComponent(sessionId)}`,
+          {
+            timeout: 10000,
+            headers: {
+              Accept: 'application/json',
+              'User-Agent': 'NexTeraDownloadBot/2.3.0',
+            },
+            validateStatus: () => true,
+          }
+        );
+
+        const httpStatus = resp.status;
+        const data = resp.data || {};
+        const sessionStatus = data.status || (httpStatus === 200 ? 'verification_completed' : undefined);
+
+        if (onStatusUpdate && sessionStatus) {
+          try {
+            await onStatusUpdate(sessionStatus);
+          } catch {}
+        }
+
+        if (httpStatus === 410 || sessionStatus === 'verification_expired') {
+          logger.error(`[TeraBox Verification] session_expired`);
+          throw new TeraBoxGatewaySessionExpiredError();
+        }
+
+        if (sessionStatus === 'verification_failed') {
+          logger.error(`[TeraBox Verification] session_failed`);
+          throw new TeraBoxGatewayVerificationFailedError(data.message || data.error || 'Verification failed on gateway.');
+        }
+
+        if (
+          httpStatus === 200 &&
+          (sessionStatus === 'verification_completed' ||
+            data.download_link ||
+            data.direct_link ||
+            data.dlink ||
+            data.files)
+        ) {
+          logger.info(`[TeraBox Verification] completed`);
+          return { status: 'verification_completed', data };
+        }
+
+        if (
+          httpStatus === 409 ||
+          sessionStatus === 'verification_pending' ||
+          sessionStatus === 'verification_in_progress'
+        ) {
+          // Still in pending verification state — wait for user
+        }
+      } catch (err: any) {
+        if (
+          err instanceof TeraBoxGatewaySessionExpiredError ||
+          err instanceof TeraBoxGatewayVerificationFailedError
+        ) {
+          throw err;
+        }
+        logger.warn(`[TeraBox Verification] polling transient error: ${err.message}`);
+      }
+
+      await new Promise(r => setTimeout(r, pollIntervalMs));
+    }
+
+    logger.error(`[TeraBox Verification] session timed out after ${timeoutMs}ms`);
+    throw new TeraBoxGatewaySessionExpiredError('Verification session timed out after 10 minutes.');
+  }
+
+  /**
+   * Completes verification and obtains the final download result from the gateway.
+   */
+  async completeGatewayVerification(sessionId: string): Promise<any> {
+    const normalizedGwUrl = normalizeGatewayUrl(config.TERABOX_GATEWAY_URL);
+    if (!normalizedGwUrl) {
+      throw new TeraBoxGatewayNotConfiguredError();
+    }
+
+    logger.info(`[TeraBox Verification] completing_session`);
+    const resp = await axios.post(
+      `${normalizedGwUrl}/api/verification/complete`,
+      { session_id: sessionId },
+      {
+        timeout: 20000,
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          'User-Agent': 'NexTeraDownloadBot/2.3.0',
+        },
+        validateStatus: () => true,
+      }
+    );
+
+    if (resp.status === 410) {
+      logger.error(`[TeraBox Verification] session_expired on complete`);
+      throw new TeraBoxGatewaySessionExpiredError();
+    }
+
+    if (resp.status === 409) {
+      logger.warn(`[TeraBox Verification] completion still requires verification (HTTP 409)`);
+      throw new TeraBoxGatewayVerificationSessionError(sessionId, '', 'Verification still pending.');
+    }
+
+    if (resp.status >= 400) {
+      throw new TeraBoxGatewayProviderFailedError(`Verification completion returned HTTP ${resp.status}`);
+    }
+
+    return resp.data;
+  }
+
+  /**
    * Primary Gateway Strategy: saahiyo/terabox-gateway integration
    */
   async resolveViaTeraBoxGateway(
     shareCode: string,
     fsId: string | number,
-    shareMetadata?: TeraBoxShareMetadata
+    shareMetadata?: TeraBoxShareMetadata,
+    options?: { onVerificationRequired?: (info: TeraBoxVerificationSessionInfo) => Promise<void> }
   ): Promise<TeraBoxDownloadResult | null> {
     const normalizedGwUrl = normalizeGatewayUrl(config.TERABOX_GATEWAY_URL);
     if (!normalizedGwUrl) {
@@ -1850,32 +2023,32 @@ export class TeraBoxResolver {
 
     const gwParsed = new URL(normalizedGwUrl);
     const gatewayHost = gwParsed.hostname;
-    const cleanPath = gwParsed.pathname.replace(/\/+$/, "");
-    const endpoint = `${gwParsed.origin}${cleanPath === "/api" ? "/api" : `${cleanPath}/api`}`;
+    const cleanPath = gwParsed.pathname.replace(/\/+$/, '');
+    const endpoint = `${gwParsed.origin}${cleanPath === '/api' ? '/api' : `${cleanPath}/api`}`;
 
     const file = shareMetadata?.fileList?.find(f => String(f.fs_id) === String(fsId)) || shareMetadata?.fileList?.[0];
-    const fileName = file?.server_filename || file?.filename || "terabox.file";
+    const fileName = file?.server_filename || file?.filename || 'terabox.file';
     const fileSize = Number(file?.size || 0);
-    const targetFsId = String(fsId || file?.fs_id || "");
+    const targetFsId = String(fsId || file?.fs_id || '');
 
     let shareUrl = shareMetadata?.sourceUrl;
     if (!shareUrl) {
-      if (shareCode.startsWith("http://") || shareCode.startsWith("https://")) {
+      if (shareCode.startsWith('http://') || shareCode.startsWith('https://')) {
         shareUrl = shareCode;
       } else {
-        const cleanCode = shareCode.startsWith("1") ? shareCode : `1${shareCode}`;
+        const cleanCode = shareCode.startsWith('1') ? shareCode : `1${shareCode}`;
         shareUrl = `https://1024terabox.com/s/${cleanCode}`;
       }
     }
 
     const params: Record<string, string> = {
       url: shareUrl,
-      resolve: "1",
+      resolve: '1',
     };
 
     let gwRes: any;
     let httpStatus = 200;
-    let responseContentType = "application/json";
+    let responseContentType = 'application/json';
 
     try {
       logger.info(
@@ -1887,25 +2060,81 @@ export class TeraBoxResolver {
         params,
         timeout: timeoutMs,
         headers: {
-          Accept: "application/json, text/plain, */*",
-          "User-Agent": "NexTeraDownloadBot/2.3.0",
+          Accept: 'application/json, text/plain, */*',
+          'User-Agent': 'NexTeraDownloadBot/2.3.0',
         },
         validateStatus: () => true, // inspect all status codes
       });
 
       httpStatus = resp.status;
-      responseContentType = String(resp.headers["content-type"] || "unknown");
+      responseContentType = String(resp.headers['content-type'] || 'unknown');
       gwRes = resp.data;
+
+      const sessionId = gwRes?.session_id || resp.data?.session_id;
+      const verificationUrl = gwRes?.verification_url || resp.data?.verification_url;
 
       if (
         httpStatus === 409 ||
         gwRes?.error === 'provider_verification_required' ||
-        gwRes?.errno === 400210 ||
-        gwRes?.errno === 400310 ||
-        gwRes?.requires_verification
+        gwRes?.status === 'provider_verification_required' ||
+        (sessionId && verificationUrl)
       ) {
-        throw new TeraBoxGatewayAuthFailedError(`Gateway provider requires verification`, 'gateway', Number(gwRes?.errno || 400210));
+        if (sessionId && verificationUrl) {
+          logger.info(`[TeraBox Verification] session_created`);
+          if (options?.onVerificationRequired) {
+            logger.info(`[TeraBox Verification] waiting_for_user`);
+            await options.onVerificationRequired({
+              sessionId,
+              verificationUrl,
+              shareCode,
+              fsId: targetFsId,
+            });
+
+            // Poll verification session
+            await this.pollGatewayVerificationSession(sessionId);
+
+            // Complete verification
+            const completeRes = await this.completeGatewayVerification(sessionId);
+            logger.info(`[TeraBox Verification] direct_link_received`);
+
+            const extractedCompleted =
+              extractTeraBoxDownloadUrl(completeRes) ||
+              extractTeraBoxDownloadUrl(completeRes?.download_link) ||
+              extractTeraBoxDownloadUrl(completeRes?.direct_link) ||
+              extractTeraBoxDownloadUrl(completeRes?.files);
+
+            if (!extractedCompleted) {
+              throw new TeraBoxGatewayLinkNotFoundError();
+            }
+
+            let finalCompletedUrl = extractedCompleted;
+            try {
+              const redirectRes = await this.resolveDlinkRedirect(extractedCompleted);
+              finalCompletedUrl = redirectRes.finalUrl;
+            } catch {}
+
+            const compFiles = Array.isArray(completeRes?.files) ? completeRes.files : [];
+            const compMatch =
+              compFiles.length > 0
+                ? (targetFsId ? compFiles.find((f: any) => String(f.fs_id) === String(targetFsId)) : null) ||
+                  compFiles[0]
+                : completeRes;
+            const resName = compMatch?.filename || compMatch?.server_filename || fileName;
+            const resSize = Number(compMatch?.size_bytes || compMatch?.size || fileSize) || fileSize;
+
+            return {
+              fileName: resName,
+              size: resSize > 0 ? resSize : undefined,
+              downloadUrl: finalCompletedUrl,
+              source: 'terabox-gateway',
+            };
+          } else {
+            throw new TeraBoxGatewayVerificationSessionError(sessionId, verificationUrl);
+          }
+        }
+        throw new TeraBoxGatewayAuthFailedError(`Gateway provider requires verification`, 'gateway', 400210);
       }
+
       if (httpStatus >= 500) {
         throw new TeraBoxGatewayUnreachableError(`Gateway server error HTTP ${httpStatus}`);
       }
@@ -1913,44 +2142,46 @@ export class TeraBoxResolver {
         throw new TeraBoxGatewayAuthFailedError(`Gateway returned unauthorized HTTP ${httpStatus}`);
       }
       if (httpStatus >= 400) {
-        throw new TeraBoxGatewayProviderFailedError(`Gateway returned HTTP ${httpStatus}: ${gwRes?.message || gwRes?.error || ''}`);
+        throw new TeraBoxGatewayProviderFailedError(
+          `Gateway returned HTTP ${httpStatus}: ${gwRes?.message || gwRes?.error || ''}`
+        );
       }
     } catch (err: any) {
       if (
+        err instanceof TeraBoxGatewayVerificationSessionError ||
+        err instanceof TeraBoxGatewaySessionExpiredError ||
+        err instanceof TeraBoxGatewayVerificationFailedError ||
         err instanceof TeraBoxGatewayAuthFailedError ||
         err instanceof TeraBoxGatewayUnreachableError ||
         err instanceof TeraBoxGatewayProviderFailedError
       ) {
         throw err;
       }
-      if (err.code === "ECONNABORTED" || err.code === "ETIMEDOUT" || err.code === "ECONNREFUSED") {
+      if (err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT' || err.code === 'ECONNREFUSED') {
         throw new TeraBoxGatewayUnreachableError(`Gateway connection failed: ${err.message}`);
       }
       throw new TeraBoxGatewayUnreachableError(`Gateway request failed: ${err.message}`);
     }
 
-    const responseKeys = gwRes && typeof gwRes === "object" ? Object.keys(gwRes) : [];
+    const responseKeys = gwRes && typeof gwRes === 'object' ? Object.keys(gwRes) : [];
     const errno = gwRes?.errno ?? gwRes?.code;
-    const errorMessage = gwRes?.error || gwRes?.message || gwRes?.errmsg || "";
-    const filesList = Array.isArray(gwRes?.files) ? gwRes.files : (Array.isArray(gwRes?.list) ? gwRes.list : []);
-    const fileCount = filesList.length > 0 ? filesList.length : (gwRes?.file_name || gwRes?.filename ? 1 : 0);
+    const errorMessage = gwRes?.error || gwRes?.message || gwRes?.errmsg || '';
+    const filesList = Array.isArray(gwRes?.files) ? gwRes.files : Array.isArray(gwRes?.list) ? gwRes.list : [];
+    const fileCount = filesList.length > 0 ? filesList.length : gwRes?.file_name || gwRes?.filename ? 1 : 0;
 
-    const matchingFile = filesList.length > 0
-      ? (targetFsId ? filesList.find((f: any) => String(f.fs_id) === String(targetFsId)) : null) || filesList[0]
-      : gwRes;
+    const matchingFile =
+      filesList.length > 0
+        ? (targetFsId ? filesList.find((f: any) => String(f.fs_id) === String(targetFsId)) : null) || filesList[0]
+        : gwRes;
 
-    const dlinkPresent = Boolean(
-      matchingFile?.dlink || gwRes?.dlink || (filesList[0]?.dlink)
-    );
+    const dlinkPresent = Boolean(matchingFile?.dlink || gwRes?.dlink || filesList[0]?.dlink);
     const downloadLinkPresent = Boolean(
-      matchingFile?.download_link || gwRes?.download_link || (filesList[0]?.download_link)
+      matchingFile?.download_link || gwRes?.download_link || filesList[0]?.download_link
     );
     const directLinkPresent = Boolean(
-      matchingFile?.direct_link || gwRes?.direct_link || (filesList[0]?.direct_link)
+      matchingFile?.direct_link || gwRes?.direct_link || filesList[0]?.direct_link
     );
-    const proxyUrlPresent = Boolean(
-      matchingFile?.proxy_url || gwRes?.proxy_url || (filesList[0]?.proxy_url)
-    );
+    const proxyUrlPresent = Boolean(matchingFile?.proxy_url || gwRes?.proxy_url || filesList[0]?.proxy_url);
 
     const rawCandidate =
       matchingFile?.direct_link ||
@@ -1966,8 +2197,8 @@ export class TeraBoxResolver {
     const extractedCandidate = extractTeraBoxDownloadUrl(rawCandidate);
     const urlValid = Boolean(extractedCandidate);
 
-    let redirectStatus = "NONE";
-    let finalHostname = "none";
+    let redirectStatus = 'NONE';
+    let finalHostname = 'none';
     let finalDownloadUrl = extractedCandidate;
 
     if (extractedCandidate) {
@@ -1987,45 +2218,66 @@ export class TeraBoxResolver {
     const gatewaySuccess = httpStatus === 200 && Boolean(finalDownloadUrl) && (!errno || errno === 0);
 
     logger.info(
-      `[TeraBox Gateway] gatewayConfigured=YES gatewayHost=${gatewayHost} gatewayEndpoint=${endpoint} gatewayStatus=${httpStatus} gatewaySuccess=${gatewaySuccess ? "YES" : "NO"} responseContentType="${responseContentType}" responseKeys=[${responseKeys.join(
-        ", "
-      )}] errno=${errno ?? "NONE"} errorMessage="${errorMessage ? String(errorMessage).slice(0, 50) : ""}" fileCount=${fileCount} dlinkPresent=${
-        dlinkPresent ? "YES" : "NO"
-      } downloadLinkPresent=${downloadLinkPresent ? "YES" : "NO"} directLinkPresent=${
-        directLinkPresent ? "YES" : "NO"
-      } proxyUrlPresent=${proxyUrlPresent ? "YES" : "NO"} urlValid=${
-        urlValid ? "YES" : "NO"
+      `[TeraBox Gateway] gatewayConfigured=YES gatewayHost=${gatewayHost} gatewayEndpoint=${endpoint} gatewayStatus=${httpStatus} gatewaySuccess=${
+        gatewaySuccess ? 'YES' : 'NO'
+      } responseContentType="${responseContentType}" responseKeys=[${responseKeys.join(
+        ', '
+      )}] errno=${errno ?? 'NONE'} errorMessage="${errorMessage ? String(errorMessage).slice(0, 50) : ''}" fileCount=${fileCount} dlinkPresent=${
+        dlinkPresent ? 'YES' : 'NO'
+      } downloadLinkPresent=${downloadLinkPresent ? 'YES' : 'NO'} directLinkPresent=${
+        directLinkPresent ? 'YES' : 'NO'
+      } proxyUrlPresent=${proxyUrlPresent ? 'YES' : 'NO'} urlValid=${
+        urlValid ? 'YES' : 'NO'
       } redirectStatus=${redirectStatus} finalHostname=${finalHostname}`
     );
 
-    if (gwRes?.status === "error" || (errno !== undefined && errno !== 0 && errno !== 200)) {
-      if (errno === 400310 || errno === 400141 || errno === 4000020 || String(errorMessage).includes("verify") || gwRes?.requires_password) {
-        throw new TeraBoxGatewayAuthFailedError(`Gateway provider requires verification`, "gateway", Number(errno));
+    if (gwRes?.status === 'error' || (errno !== undefined && errno !== 0 && errno !== 200)) {
+      if (
+        errno === 400310 ||
+        errno === 400141 ||
+        errno === 4000020 ||
+        String(errorMessage).includes('verify') ||
+        gwRes?.requires_password
+      ) {
+        throw new TeraBoxGatewayAuthFailedError(`Gateway provider requires verification`, 'gateway', Number(errno));
       }
-      throw new TeraBoxGatewayProviderFailedError(`Gateway provider error: ${errorMessage || errno}`, "gateway", Number(errno));
+      throw new TeraBoxGatewayProviderFailedError(
+        `Gateway provider error: ${errorMessage || errno}`,
+        'gateway',
+        Number(errno)
+      );
     }
 
     if (!finalDownloadUrl) {
       throw new TeraBoxGatewayLinkNotFoundError();
     }
 
-    const resolvedFileName = matchingFile?.filename || matchingFile?.server_filename || gwRes?.file_name || gwRes?.filename || gwRes?.title || fileName;
-    const resolvedSize = Number(matchingFile?.size_bytes || matchingFile?.size || gwRes?.file_size || gwRes?.size || fileSize) || fileSize;
+    const resolvedFileName =
+      matchingFile?.filename ||
+      matchingFile?.server_filename ||
+      gwRes?.file_name ||
+      gwRes?.filename ||
+      gwRes?.title ||
+      fileName;
+    const resolvedSize =
+      Number(matchingFile?.size_bytes || matchingFile?.size || gwRes?.file_size || gwRes?.size || fileSize) ||
+      fileSize;
 
     return {
       fileName: resolvedFileName,
       size: resolvedSize > 0 ? resolvedSize : undefined,
       downloadUrl: finalDownloadUrl,
-      source: "terabox-gateway",
+      source: 'terabox-gateway',
     };
   }
 
   async resolveWithGateway(
     fsId: string | number,
-    shareContext: TeraBoxShareMetadata
+    shareContext: TeraBoxShareMetadata,
+    options?: { onVerificationRequired?: (info: TeraBoxVerificationSessionInfo) => Promise<void> }
   ): Promise<TeraBoxDownloadResult> {
     const shareCode = shareContext.shareCode || shareContext.surl || '';
-    const res = await this.resolveViaTeraBoxGateway(shareCode, String(fsId), shareContext);
+    const res = await this.resolveViaTeraBoxGateway(shareCode, String(fsId), shareContext, options);
     if (!res) {
       throw new TeraBoxGatewayLinkNotFoundError();
     }
@@ -2182,7 +2434,11 @@ export class TeraBoxResolver {
   /**
    * Resolve direct download URL for a specific selected file across the multi-tier pipeline.
    */
-  async resolveSelectedFile(url: string, fsId?: string | number): Promise<TeraBoxResolvedFile> {
+  async resolveSelectedFile(
+    url: string,
+    fsId?: string | number,
+    options?: { onVerificationRequired?: (info: TeraBoxVerificationSessionInfo) => Promise<void> }
+  ): Promise<TeraBoxResolvedFile> {
     const shareMetadata = await this.getShareMetadata(url);
     const fileList = shareMetadata.fileList;
 
@@ -2208,7 +2464,7 @@ export class TeraBoxResolver {
 
     // Multi-tier strategy order starting with primary Gateway strategy
     const strategies = [
-      { name: 'gateway', fn: () => this.resolveWithGateway(targetFsId, shareMetadata) },
+      { name: 'gateway', fn: () => this.resolveWithGateway(targetFsId, shareMetadata, options) },
       { name: 'seiya-authenticated-download', fn: () => this.resolveWithAuthenticatedDownloadFlow(targetFsId, shareMetadata) },
       { name: 'terabox-api-reference', fn: () => this.resolveWithTeraboxApiReference(targetFsId, shareMetadata) },
       { name: 'pahadi10-reference', fn: () => this.resolveWithPahadi10Flow(targetFsId, shareMetadata) },
