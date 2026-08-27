@@ -71,7 +71,12 @@ export function normalizeGatewayUrl(rawUrl?: string): string | null {
   try {
     const parsed = new URL(trimmed);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
-    return `${parsed.protocol}//${parsed.host}${parsed.pathname === '/' ? '' : parsed.pathname}`.replace(/\/+$/, '');
+    let host = parsed.host;
+    if (parsed.hostname.endsWith('.railway.internal') && !parsed.port) {
+      host = `${parsed.hostname}:8080`;
+    }
+    const pathname = parsed.pathname === '/' ? '' : parsed.pathname;
+    return `${parsed.protocol}//${host}${pathname}`.replace(/\/+$/, '');
   } catch {
     return null;
   }
@@ -1102,12 +1107,29 @@ export class TeraBoxResolver {
     // Strategy 1: Configured Gateway Service (if set)
     if (config.TERABOX_GATEWAY_URL) {
       try {
-        const gwRes = await this.safeFetch(`${config.TERABOX_GATEWAY_URL}/api/get-info?shorturl=${shareCode}`);
-        if (gwRes && Array.isArray(gwRes.list) && gwRes.list.length > 0) {
-          fileList = gwRes.list;
+        const normalizedGwUrl = normalizeGatewayUrl(config.TERABOX_GATEWAY_URL);
+        if (normalizedGwUrl) {
+          const gwParsed = new URL(normalizedGwUrl);
+          const cleanPath = gwParsed.pathname.replace(/\/+$/, '');
+          const gwEndpoint = `${gwParsed.origin}${cleanPath === '/api' ? '/api' : `${cleanPath}/api`}`;
+          const cleanCode = shareCode.startsWith('1') ? shareCode : `1${shareCode}`;
+          const shareUrl = `https://1024terabox.com/s/${cleanCode}`;
+
+          const gwRes = await this.safeFetch(gwEndpoint, {
+            method: 'GET',
+            params: {
+              url: shareUrl,
+              resolve: '1',
+            },
+          });
+          if (gwRes && gwRes.status === 'success' && Array.isArray(gwRes.files) && gwRes.files.length > 0) {
+            fileList = gwRes.files;
+          } else if (gwRes && Array.isArray(gwRes.list) && gwRes.list.length > 0) {
+            fileList = gwRes.list;
+          }
         }
       } catch (e: any) {
-        logger.warn(`[TeraBox] Configured gateway resolution failed: ${e.message}`);
+        logger.warn(`[TeraBox] Configured gateway metadata resolution failed: ${e.message}`);
       }
     }
 

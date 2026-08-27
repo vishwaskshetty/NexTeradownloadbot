@@ -167,6 +167,13 @@ describe('TeraBox Authenticated Multi-Tier Resolver Suite', () => {
       axios.get = origAxiosGet;
     });
 
+    it('normalizes Railway internal gateway URLs to port 8080 when port is omitted', () => {
+      expect(normalizeGatewayUrl('http://terabox-gateway-nex.railway.internal')).toBe('http://terabox-gateway-nex.railway.internal:8080');
+      expect(normalizeGatewayUrl('http://terabox-gateway-nex.railway.internal:8080')).toBe('http://terabox-gateway-nex.railway.internal:8080');
+      expect(normalizeGatewayUrl('http://terabox-gateway-nex.railway.internal:8080/api')).toBe('http://terabox-gateway-nex.railway.internal:8080/api');
+      expect(normalizeGatewayUrl('http://localhost:5000')).toBe('http://localhost:5000');
+    });
+
     it('throws TeraBoxGatewayNotConfiguredError when gateway is unset', async () => {
       config.TERABOX_GATEWAY_URL = undefined;
       const resolver = new TeraBoxResolver();
@@ -278,7 +285,7 @@ describe('TeraBox Authenticated Multi-Tier Resolver Suite', () => {
       });
 
       const res = await resolver.resolveViaTeraBoxGateway('1fKvukFFlwMqHt3vbdFoRYQ', '207400602392562');
-      expect(calledUrl).toBe('http://terabox-gateway-nex.railway.internal/api');
+      expect(calledUrl).toBe('http://terabox-gateway-nex.railway.internal:8080/api');
       expect(calledParams).toEqual({
         url: 'https://1024terabox.com/s/1fKvukFFlwMqHt3vbdFoRYQ',
         resolve: '1',
