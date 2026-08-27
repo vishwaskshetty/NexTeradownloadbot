@@ -989,7 +989,16 @@ export class TeraBoxResolver {
       rawBody = err.message || '';
     }
 
-    let errno = res && typeof res === 'object' && res.errno !== undefined ? res.errno : -1;
+    const isJson = contentType.toLowerCase().includes('application/json') || (typeof res === 'object' && res !== null && !Array.isArray(res));
+    const isHtml = contentType.toLowerCase().includes('text/html') || typeof res === 'string';
+
+    if (isHtml) {
+      logger.warn(
+        `[TeraBox HomeInfo Mismatch] /api/home/info returned HTML (content-type="${contentType}") instead of JSON API response. Recording API mismatch.`
+      );
+    }
+
+    let errno = isJson && typeof res?.errno === 'number' ? res.errno : -1;
     let data: TeraBoxHomeInfoData = (res && typeof res === 'object' && res.data) ? { ...res.data } : {};
 
     // If response was HTML or missing sign fields, extract from HTML body
@@ -1006,7 +1015,6 @@ export class TeraBoxResolver {
       data.sign3 = sign3;
       data.signb = signb;
       data.timestamp = timestamp;
-      if (errno === -1) errno = 0;
     }
 
     // Safe 150 characters snippet of body (never contains tokens)
@@ -1032,9 +1040,10 @@ export class TeraBoxResolver {
     );
 
     return {
-      errno,
-      errmsg: res?.errmsg,
+      errno: isJson && typeof res?.errno === 'number' ? res.errno : (isHtml ? 400210 : errno),
+      errmsg: res?.errmsg || (isHtml ? 'API returned HTML page instead of JSON API response' : undefined),
       data,
+      isHtmlFallback: isHtml,
     };
   }
 

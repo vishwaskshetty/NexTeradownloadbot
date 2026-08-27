@@ -326,6 +326,32 @@ describe('TeraBox Authenticated Multi-Tier Resolver Suite', () => {
         resolver.resolveViaTeraBoxGateway('https://terabox.com/s/1abc', '123')
       ).rejects.toThrow(TeraBoxGatewayAuthFailedError);
     });
+
+    it('handles gateway timeout and network errors', async () => {
+      config.TERABOX_GATEWAY_URL = 'http://localhost:5000';
+      const resolver = new TeraBoxResolver();
+
+      axios.get = jest.fn().mockRejectedValue(new Error('Gateway request timed out'));
+
+      await expect(
+        resolver.resolveViaTeraBoxGateway('https://terabox.com/s/1abc', '123')
+      ).rejects.toThrow(TeraBoxGatewayUnreachableError);
+    });
+
+    it('handles gateway HTTP 500 error gracefully', async () => {
+      config.TERABOX_GATEWAY_URL = 'http://localhost:5000';
+      const resolver = new TeraBoxResolver();
+
+      axios.get = jest.fn().mockResolvedValue({
+        status: 500,
+        headers: { 'content-type': 'application/json' },
+        data: { status: 'error', error: 'internal_error', message: 'An unexpected error occurred' },
+      });
+
+      await expect(
+        resolver.resolveViaTeraBoxGateway('https://terabox.com/s/1abc', '123')
+      ).rejects.toThrow(TeraBoxGatewayUnreachableError);
+    });
   });
 
   // 9. Primary Strategy Ordering (Gateway FIRST when configured)
