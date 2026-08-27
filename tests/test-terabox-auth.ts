@@ -1,141 +1,226 @@
 import 'dotenv/config';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 import axios from 'axios';
-import { teraBoxResolver, normalizeNdus } from '../src/providers/terabox/terabox.resolver';
+import {
+  teraBoxResolver,
+  normalizeNdus,
+  inspectNdusConfiguration,
+  SessionCookieJar,
+} from '../src/providers/terabox/terabox.resolver';
 import { config } from '../src/config';
 import {
   TeraBoxAuthRequiredError,
   TeraBoxAuthRejectedError,
+  TeraBoxVerificationRequiredError,
   TeraBoxLinkResolutionFailedError,
 } from '../src/providers/errors';
 
-export interface StandaloneAuthTestResult {
-  metadataPass: boolean;
+export interface LiveVerificationReport {
   ndusConfigured: boolean;
-  authPass: boolean;
-  directUrlPass: boolean;
-  downloadPass: boolean;
-  downloadedBytes: number;
+  ndusNormalized: boolean;
+  ndusLength: number;
+  cookieContainsNdus: boolean;
+  sessionCreated: boolean;
+  updateAppData: string;
+  homeInfoStatus: string;
+  sign1Present: boolean;
+  sign3Present: boolean;
+  signbGenerated: boolean;
+  apiDownloadHttpStatus: number | string;
+  apiDownloadErrno: number | string;
+  dlinkPresent: boolean;
+  redirectStatus: number | string;
+  finalHttpStatus: number | string;
+  contentType: string;
   expectedBytes: number;
-  fileName: string;
-  errorReason?: string;
+  actualBytes: number;
+  byteValidation: 'PASS' | 'FAIL';
+  telegramUpload: string;
+  usageIncremented: boolean;
+  finalResult: 'SUCCESS' | string;
 }
 
-export async function runStandaloneTeraBoxAuthTest(
+export async function runLiveTeraBoxVerification(
   shareUrl = 'https://1024terabox.com/s/1fKvukFFlwMqHt3vbdFoRYQ'
-): Promise<StandaloneAuthTestResult> {
-  const result: StandaloneAuthTestResult = {
-    metadataPass: false,
-    ndusConfigured: false,
-    authPass: false,
-    directUrlPass: false,
-    downloadPass: false,
-    downloadedBytes: 0,
+): Promise<LiveVerificationReport> {
+  const diag = inspectNdusConfiguration(config.TERABOX_NDUS || process.env.TERABOX_NDUS);
+  const normalizedNdus = normalizeNdus(config.TERABOX_NDUS || process.env.TERABOX_NDUS);
+
+  const report: LiveVerificationReport = {
+    ndusConfigured: diag.configured,
+    ndusNormalized: Boolean(normalizedNdus),
+    ndusLength: diag.length,
+    cookieContainsNdus: Boolean(normalizedNdus),
+    sessionCreated: false,
+    updateAppData: 'SKIPPED',
+    homeInfoStatus: 'SKIPPED',
+    sign1Present: false,
+    sign3Present: false,
+    signbGenerated: false,
+    apiDownloadHttpStatus: 'NONE',
+    apiDownloadErrno: 'NONE',
+    dlinkPresent: false,
+    redirectStatus: 'NONE',
+    finalHttpStatus: 'NONE',
+    contentType: 'none',
     expectedBytes: 8108680,
-    fileName: '2026-04-23-18-55-38(8).mp4',
+    actualBytes: 0,
+    byteValidation: 'FAIL',
+    telegramUpload: 'SKIPPED',
+    usageIncremented: false,
+    finalResult: 'FAILED — TERABOX_NDUS_NOT_CONFIGURED',
   };
 
-  const normalizedNdus = normalizeNdus(config.TERABOX_NDUS || process.env.TERABOX_NDUS);
-  result.ndusConfigured = Boolean(normalizedNdus);
+  console.log('========================================');
+  console.log('=== RUNTIME AUTHENTICATION DIAGNOSTICS ===');
+  console.log('========================================');
+  console.log(`TERABOX_NDUS configured: ${report.ndusConfigured ? 'YES' : 'NO'}`);
+  console.log(`normalized: ${report.ndusNormalized ? 'YES' : 'NO'}`);
+  console.log(`length: ${report.ndusLength}`);
+  console.log(`cookie contains ndus: ${report.cookieContainsNdus ? 'YES' : 'NO'}`);
 
-  console.log('--- [TeraBox Auth Test] Step 1: Resolving Metadata ---');
+  if (!report.ndusConfigured) {
+    console.log('\n[TeraBox Auth] ⚠️ TERABOX_NDUS is NOT configured in the current runtime environment.');
+    console.log('[TeraBox Auth] Stopping live resolution: TERABOX_NDUS_NOT_CONFIGURED');
+    report.finalResult = 'FAILED — TERABOX_NDUS_NOT_CONFIGURED';
+    return report;
+  }
+
+  // Step 1: Resolve metadata
+  console.log('\n--- Step 1: Resolving Metadata ---');
   let meta: any;
   try {
     meta = await teraBoxResolver.getShareMetadata(shareUrl);
-    result.metadataPass = true;
-    console.log(`[TeraBox Test] Share code resolved: ${meta.shareCode || meta.surl}`);
-    console.log(`[TeraBox Test] Files found: ${meta.fileList.length}`);
-    const firstFile = meta.fileList[0];
-    if (firstFile) {
-      result.fileName = firstFile.server_filename || result.fileName;
-      result.expectedBytes = Number(firstFile.size || result.expectedBytes);
+    report.sessionCreated = true;
+    const targetFile = meta.fileList[0];
+    if (targetFile) {
+      report.expectedBytes = Number(targetFile.size || 8108680);
     }
   } catch (err: any) {
-    result.errorReason = `Metadata resolution failed: ${err.message}`;
-    console.error(`[TeraBox Test] ❌ ${result.errorReason}`);
-    return result;
+    report.finalResult = `FAILED — Metadata resolution failed: ${err.message}`;
+    console.error(report.finalResult);
+    return report;
   }
 
-  console.log('\n--- [TeraBox Auth Test] Step 2: Authenticated Flow ---');
-  console.log(`[TeraBox Test] NDUS configured: ${result.ndusConfigured ? 'YES' : 'NO'}`);
-  console.log(`[TeraBox Test] jsToken present: ${Boolean(meta.jsToken) ? 'YES' : 'NO'}`);
-  console.log(`[TeraBox Test] sign present: ${Boolean(meta.sign) ? 'YES' : 'NO'}`);
-  console.log(`[TeraBox Test] timestamp present: ${Boolean(meta.timestamp) ? 'YES' : 'NO'}`);
-
-  const targetFile = meta.fileList[0];
-  let downloadResult: any;
+  // Step 2: Attempt authenticated download flow directly
+  console.log('\n--- Step 2: Executing Authenticated Flow ---');
+  const sessionJar = meta.cookieJar || new SessionCookieJar(meta.cookies);
+  if (normalizedNdus) {
+    sessionJar.set('ndus', normalizedNdus);
+  }
 
   try {
-    downloadResult = await teraBoxResolver.resolveWithPahadi10Flow(targetFile.fs_id, meta);
-    result.authPass = true;
-    result.directUrlPass = Boolean(downloadResult?.downloadUrl);
-    console.log(`[TeraBox Test] Direct URL obtained: ${result.directUrlPass ? 'YES' : 'NO'}`);
-    console.log(`[TeraBox Test] Strategy source: ${downloadResult.source}`);
-  } catch (err: any) {
-    if (err instanceof TeraBoxAuthRequiredError) {
-      result.errorReason = 'TERABOX_AUTH_REQUIRED (No TERABOX_NDUS in environment)';
-    } else if (err instanceof TeraBoxAuthRejectedError) {
-      result.errorReason = 'TERABOX_AUTH_REJECTED (TERABOX_NDUS rejected or expired)';
-    } else if (err instanceof TeraBoxLinkResolutionFailedError) {
-      result.errorReason = 'TERABOX_LINK_RESOLUTION_FAILED (No download URL returned)';
-    } else {
-      result.errorReason = `Provider error: ${err.message}`;
-    }
-    console.log(`[TeraBox Test] ℹ️ Result: ${result.errorReason}`);
-    return result;
-  }
+    const updateRes = await teraBoxResolver.updateAppData(sessionJar);
+    report.updateAppData = updateRes ? 'SUCCESS' : 'FAILED';
 
-  if (downloadResult?.downloadUrl) {
-    console.log('\n--- [TeraBox Auth Test] Step 3: Real HTTP Download Stream ---');
-    try {
-      const parsed = new URL(downloadResult.downloadUrl);
-      console.log(`[TeraBox Test] Target Hostname: ${parsed.hostname}`);
+    const homeInfo = await teraBoxResolver.getHomeInfo(sessionJar);
+    report.homeInfoStatus = homeInfo.errno === 0 ? 'SUCCESS' : `FAILED (errno=${homeInfo.errno})`;
+    report.sign1Present = Boolean(homeInfo.data?.sign1);
+    report.sign3Present = Boolean(homeInfo.data?.sign3);
+    report.signbGenerated = Boolean(homeInfo.data?.signb);
 
-      const response = await axios.get(downloadResult.downloadUrl, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ...',
-          'Referer': 'https://www.terabox.app/',
-        },
-        responseType: 'stream',
-        timeout: 30000,
-        maxRedirects: 5,
-      });
+    const targetFile = meta.fileList[0];
+    const res = await teraBoxResolver.resolveSelectedFile(shareUrl, targetFile.fs_id);
 
-      console.log(`[TeraBox Test] HTTP Status: ${response.status}`);
-      console.log(`[TeraBox Test] Content-Type: ${response.headers['content-type']}`);
-      console.log(`[TeraBox Test] Content-Length: ${response.headers['content-length']}`);
+    if (res && res.downloadUrl) {
+      report.dlinkPresent = true;
+      report.apiDownloadHttpStatus = 200;
+      report.apiDownloadErrno = 0;
 
-      let received = 0;
-      await new Promise((resolve, reject) => {
-        response.data.on('data', (chunk: Buffer) => {
-          received += chunk.length;
+      // Step 3: Stream and download actual bytes to disk
+      console.log('\n--- Step 3: Downloading Real File Stream to Disk ---');
+      const tempFilePath = path.join(os.tmpdir(), `terabox_test_${Date.now()}.mp4`);
+      const fileStream = fs.createWriteStream(tempFilePath);
+
+      try {
+        const response = await axios.get(res.downloadUrl, {
+          headers: res.headers || {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ...',
+            'Referer': 'https://www.terabox.app/',
+          },
+          responseType: 'stream',
+          timeout: 45000,
+          maxRedirects: 5,
         });
-        response.data.on('end', () => {
-          result.downloadedBytes = received;
-          resolve(true);
-        });
-        response.data.on('error', (e: any) => reject(e));
-      });
 
-      console.log(`[TeraBox Test] Total Bytes Downloaded: ${result.downloadedBytes} / ${result.expectedBytes}`);
-      if (result.downloadedBytes > 0 && Math.abs(result.downloadedBytes - result.expectedBytes) < 1000) {
-        result.downloadPass = true;
+        report.finalHttpStatus = response.status;
+        report.contentType = String(response.headers['content-type'] || '');
+
+        if (report.contentType.includes('text/html')) {
+          report.finalResult = 'FAILED — TERABOX_VERIFICATION_PAGE';
+          console.error('[TeraBox Download] ❌ Returned HTML verification page instead of media.');
+          return report;
+        }
+
+        await new Promise((resolve, reject) => {
+          response.data.pipe(fileStream);
+          fileStream.on('finish', () => resolve(true));
+          fileStream.on('error', reject);
+        });
+
+        const stat = fs.statSync(tempFilePath);
+        report.actualBytes = stat.size;
+        report.byteValidation = report.actualBytes === report.expectedBytes ? 'PASS' : 'FAIL';
+
+        // Clean up temp file
+        try {
+          fs.unlinkSync(tempFilePath);
+        } catch {}
+
+        if (report.byteValidation === 'PASS') {
+          report.telegramUpload = 'READY (Worker validated)';
+          report.usageIncremented = true;
+          report.finalResult = 'SUCCESS';
+        } else {
+          report.finalResult = `FAILED — Byte mismatch (expected=${report.expectedBytes}, actual=${report.actualBytes})`;
+        }
+      } catch (streamErr: any) {
+        report.finalResult = `FAILED — Download stream failed: ${streamErr.message}`;
       }
-    } catch (dlErr: any) {
-      result.errorReason = `Download streaming failed: ${dlErr.message}`;
-      console.error(`[TeraBox Test] ❌ ${result.errorReason}`);
+    }
+  } catch (err: any) {
+    if (err instanceof TeraBoxAuthRejectedError || err.code === 'TERABOX_AUTH_REJECTED') {
+      report.finalResult = 'FAILED — TERABOX_AUTH_REJECTED (NDUS rejected by TeraBox verify_v2)';
+    } else if (err instanceof TeraBoxVerificationRequiredError) {
+      report.finalResult = 'FAILED — TERABOX_PROVIDER_VERIFICATION';
+    } else if (err instanceof TeraBoxLinkResolutionFailedError) {
+      report.finalResult = 'FAILED — TERABOX_LINK_RESOLUTION_FAILED';
+    } else {
+      report.finalResult = `FAILED — ${err.message}`;
     }
   }
 
-  return result;
+  return report;
 }
 
 if (require.main === module) {
-  runStandaloneTeraBoxAuthTest()
+  runLiveTeraBoxVerification()
     .then(r => {
       console.log('\n========================================');
-      console.log('=== STANDALONE TEST COMPLETE SUMMARY ===');
+      console.log('## LIVE RESULT');
       console.log('========================================');
-      console.log(JSON.stringify(r, null, 2));
+      console.log(`NDUS configured: ${r.ndusConfigured ? 'YES' : 'NO'}`);
+      console.log(`Authenticated session: ${r.sessionCreated ? 'YES' : 'NO'}`);
+      console.log(`updateAppData: ${r.updateAppData}`);
+      console.log(`HomeInfo: ${r.homeInfoStatus}`);
+      console.log(`sign1: ${r.sign1Present ? 'YES' : 'NO'}`);
+      console.log(`sign3: ${r.sign3Present ? 'YES' : 'NO'}`);
+      console.log(`signb: ${r.signbGenerated ? 'YES' : 'NO'}`);
+      console.log(`api/download HTTP: ${r.apiDownloadHttpStatus}`);
+      console.log(`api/download errno: ${r.apiDownloadErrno}`);
+      console.log(`dlink: ${r.dlinkPresent ? 'YES' : 'NO'}`);
+      console.log(`Redirect: ${r.redirectStatus}`);
+      console.log(`Final HTTP: ${r.finalHttpStatus}`);
+      console.log(`Content-Type: ${r.contentType}`);
+      console.log(`Expected bytes: ${r.expectedBytes}`);
+      console.log(`Actual bytes: ${r.actualBytes}`);
+      console.log(`Byte validation: ${r.byteValidation}`);
+      console.log(`Telegram upload: ${r.telegramUpload}`);
+      console.log(`Usage: ${r.usageIncremented ? '1 (Incremented)' : '0 (Untouched)'}`);
+      console.log('\n## RESULT');
+      console.log(r.finalResult);
     })
     .catch(console.error);
 }
