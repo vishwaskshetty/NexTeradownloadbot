@@ -2071,7 +2071,7 @@ export class TeraBoxResolver {
       gwRes = resp.data;
 
       const sessionId = gwRes?.session_id || resp.data?.session_id;
-      const verificationUrl = gwRes?.verification_url || resp.data?.verification_url;
+      let verificationUrl = gwRes?.verification_url || resp.data?.verification_url;
 
       if (
         httpStatus === 409 ||
@@ -2080,6 +2080,10 @@ export class TeraBoxResolver {
         (sessionId && verificationUrl)
       ) {
         if (sessionId && verificationUrl) {
+          if (verificationUrl.startsWith('/')) {
+            verificationUrl = `${normalizedGwUrl}${verificationUrl}`;
+          }
+
           logger.info(`[TeraBox Verification] session_created`);
           if (options?.onVerificationRequired) {
             logger.info(`[TeraBox Verification] waiting_for_user`);
