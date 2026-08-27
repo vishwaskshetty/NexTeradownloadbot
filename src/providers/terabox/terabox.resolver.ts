@@ -1888,6 +1888,15 @@ export class TeraBoxResolver {
       responseContentType = String(resp.headers["content-type"] || "unknown");
       gwRes = resp.data;
 
+      if (
+        httpStatus === 409 ||
+        gwRes?.error === 'provider_verification_required' ||
+        gwRes?.errno === 400210 ||
+        gwRes?.errno === 400310 ||
+        gwRes?.requires_verification
+      ) {
+        throw new TeraBoxGatewayAuthFailedError(`Gateway provider requires verification`, 'gateway', Number(gwRes?.errno || 400210));
+      }
       if (httpStatus >= 500) {
         throw new TeraBoxGatewayUnreachableError(`Gateway server error HTTP ${httpStatus}`);
       }
@@ -1895,7 +1904,7 @@ export class TeraBoxResolver {
         throw new TeraBoxGatewayAuthFailedError(`Gateway returned unauthorized HTTP ${httpStatus}`);
       }
       if (httpStatus >= 400) {
-        throw new TeraBoxGatewayProviderFailedError(`Gateway returned HTTP ${httpStatus}`);
+        throw new TeraBoxGatewayProviderFailedError(`Gateway returned HTTP ${httpStatus}: ${gwRes?.message || gwRes?.error || ''}`);
       }
     } catch (err: any) {
       if (

@@ -311,6 +311,21 @@ describe('TeraBox Authenticated Multi-Tier Resolver Suite', () => {
         resolver.resolveViaTeraBoxGateway('code1', '123')
       ).rejects.toThrow(TeraBoxGatewayAuthFailedError);
     });
+
+    it('handles gateway HTTP 409 provider_verification_required response', async () => {
+      config.TERABOX_GATEWAY_URL = 'http://localhost:5000';
+      const resolver = new TeraBoxResolver();
+
+      axios.get = jest.fn().mockResolvedValue({
+        status: 409,
+        headers: { 'content-type': 'application/json' },
+        data: { status: 'error', error: 'provider_verification_required', errno: 400210, message: 'need verify_v2' },
+      });
+
+      await expect(
+        resolver.resolveViaTeraBoxGateway('https://terabox.com/s/1abc', '123')
+      ).rejects.toThrow(TeraBoxGatewayAuthFailedError);
+    });
   });
 
   // 9. Primary Strategy Ordering (Gateway FIRST when configured)
