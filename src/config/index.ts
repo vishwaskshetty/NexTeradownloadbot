@@ -37,6 +37,7 @@ const envSchema = z.object({
   TERABOX_REFRESH_TOKEN: z.string().optional(),
   TERABOX_NDUS: z.string().optional(),
   TERABOX_GATEWAY_URL: z.string().optional(),
+  TERABOX_GATEWAY_PUBLIC_URL: z.string().optional(),
   TERABOX_GATEWAY_TIMEOUT_MS: z.coerce.number().default(15000),
   // Diskwala Official API credentials (optional)
   DISKWALA_API_KEY: z.string().optional(),

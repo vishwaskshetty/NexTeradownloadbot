@@ -25,7 +25,9 @@ import {
 import {
   clearTeraBoxShareCache,
   extractShareCode,
-  TeraBoxVerificationSessionInfo,
+  normalizeGatewayUrl,
+  extractTeraBoxDownloadUrl,
+  buildPublicVerificationUrl,
 } from '../providers/terabox/terabox.resolver';
 import { bot } from '../bot';
 import { config } from '../config';
@@ -408,44 +410,163 @@ export const initWorker = () => {
           await clearTeraBoxShareCache(shareCode);
         }
 
-        // Setup user verification callback for manual verification session
-        const onVerificationRequired = async (info: TeraBoxVerificationSessionInfo) => {
-          logger.info(`[TeraBox Verification] session_created`);
-          logger.info(`[TeraBox Verification] waiting_for_user`);
-
-          const verificationMsg =
-            `⚠️ *TeraBox verification required*\n\n` +
-            `TeraBox requires a browser verification before the direct download can be generated.\n\n` +
-            `Open the verification page below and complete the verification manually.\n\n` +
-            `⏳ _Waiting for verification (up to 10 minutes)..._`;
-
-          const keyboard = {
-            reply_markup: {
-              inline_keyboard: [
-                [
-                  {
-                    text: '🔐 Complete TeraBox Verification',
-                    url: info.verificationUrl,
-                  },
-                ],
-              ],
-            },
-          };
-
-          await updateStatusMessage(verificationMsg, keyboard);
-        };
-
         // Resolve a completely fresh direct download URL from TeraBox
         const adapterInstance = adapter as any;
         try {
           resolvedFile = typeof adapterInstance.resolveSelectedFile === 'function'
-            ? await adapterInstance.resolveSelectedFile(url, fsId, { onVerificationRequired })
+            ? await adapterInstance.resolveSelectedFile(url, fsId)
             : await adapter.resolve(url);
         } catch (resolveErr: any) {
+          // ── Gateway verification required: handle inline, do NOT fail the job ──
+          const isVerificationError =
+            resolveErr instanceof TeraBoxGatewayVerificationSessionError ||
+            resolveErr?.code === 'TERABOX_GATEWAY_VERIFICATION_REQUIRED' ||
+            resolveErr?.name === 'TeraBoxGatewayVerificationSessionError' ||
+            (typeof resolveErr === 'object' && resolveErr !== null && Boolean(resolveErr.sessionId) && Boolean(resolveErr.verificationUrl));
+
+          if (isVerificationError) {
+            const sessionId = String(resolveErr.sessionId);
+            const verificationUrl = buildPublicVerificationUrl(sessionId, resolveErr.verificationUrl);
+
+            logger.info(`[TeraBox Verification] session_received sessionId=${sessionId.substring(0, 8)}***`);
+
+            // Send the verification button to the Telegram user
+            const verificationMsg =
+              `⚠️ *TeraBox Verification Required*\n\n` +
+              `TeraBox requires browser verification before the file can be downloaded.\n\n` +
+              `1\. Open the verification link below\n` +
+              `2\. Complete the challenge in the browser\n` +
+              `3\. The download will resume automatically\n\n` +
+              `⏳ _Waiting up to 10 minutes..._`;
+
+            const keyboard = {
+              reply_markup: {
+                inline_keyboard: [
+                  [
+                    { text: '🔐 Complete TeraBox Verification', url: verificationUrl },
+                  ],
+                ],
+              },
+            };
+            await updateStatusMessage(verificationMsg, keyboard);
+            logger.info(`[TeraBox Verification] user_prompt_sent`);
+
+            // Poll gateway session until completed/expired, then call /complete
+            const normalizedGwUrl = normalizeGatewayUrl(config.TERABOX_GATEWAY_URL);
+
+            if (!normalizedGwUrl) {
+              throw new TeraBoxGatewayVerificationSessionError(
+                sessionId, verificationUrl,
+                'Gateway URL not configured — cannot poll verification session',
+                'verification'
+              );
+            }
+
+            const pollTimeoutMs = 600000; // 10 minutes
+            const pollIntervalMs = 5000;
+            const pollStart = Date.now();
+            let verificationCompleted = false;
+
+            logger.info(`[TeraBox Verification] polling_started sessionId=${sessionId.substring(0, 8)}***`);
+
+            while (Date.now() - pollStart < pollTimeoutMs) {
+              await new Promise(r => setTimeout(r, pollIntervalMs));
+
+              try {
+                const statusResp = await axios.get(
+                  `${normalizedGwUrl}/api/verification/session/${encodeURIComponent(sessionId)}`,
+                  { timeout: 10000, validateStatus: () => true }
+                );
+                const statusData = statusResp.data || {};
+                const sessionStatus: string = statusData.status || '';
+                logger.info(`[TeraBox Verification] state=${sessionStatus} sessionId=${sessionId.substring(0, 8)}***`);
+
+                if (statusResp.status === 410 || sessionStatus === 'verification_expired' || (sessionStatus === 'error' && statusData.error === 'verification_expired')) {
+                  throw new TeraBoxGatewaySessionExpiredError();
+                }
+                if (sessionStatus === 'verification_failed') {
+                  throw new TeraBoxGatewayVerificationFailedError(statusData.message || 'Verification failed');
+                }
+                if (sessionStatus === 'verification_completed') {
+                  verificationCompleted = true;
+                  break;
+                }
+                // verification_pending / verification_in_progress — keep polling
+              } catch (pollErr: any) {
+                if (
+                  pollErr instanceof TeraBoxGatewaySessionExpiredError ||
+                  pollErr instanceof TeraBoxGatewayVerificationFailedError
+                ) {
+                  throw pollErr;
+                }
+                logger.warn(`[TeraBox Verification] poll transient error: ${pollErr.message}`);
+              }
+            }
+
+            if (!verificationCompleted) {
+              throw new TeraBoxGatewaySessionExpiredError('Verification session timed out after 10 minutes.');
+            }
+
+            // Verification complete — call /complete to get the direct URL
+            logger.info(`[TeraBox Verification] completion_requested sessionId=${sessionId.substring(0, 8)}***`);
+            const completeResp = await axios.post(
+              `${normalizedGwUrl}/api/verification/complete`,
+              { session_id: sessionId },
+              { timeout: 30000, validateStatus: () => true }
+            );
+
+            if (completeResp.status === 410) {
+              throw new TeraBoxGatewaySessionExpiredError();
+            }
+            if (completeResp.status === 409) {
+              throw new TeraBoxGatewayVerificationFailedError('Verification complete call returned 409 — still pending');
+            }
+
+            const completeData = completeResp.data || {};
+            if (completeResp.status !== 200 || completeData.status !== 'success') {
+              throw new TeraBoxGatewayVerificationFailedError(
+                completeData.message || `Completion endpoint returned HTTP ${completeResp.status}`
+              );
+            }
+
+            // Extract direct URL from the completion response files
+            const completeFiles: any[] = Array.isArray(completeData.files) ? completeData.files : [];
+            const completedFile = (completeFiles.find((f: any) => String(f.fs_id) === String(fsId)) || completeFiles[0]) ?? {};
+            const rawCompleteUrl =
+              completedFile.direct_link ||
+              completedFile.download_link ||
+              completedFile.dlink ||
+              completeData.direct_link ||
+              completeData.download_link;
+            const extractedUrl = extractTeraBoxDownloadUrl(rawCompleteUrl);
+
+            if (!extractedUrl) {
+              throw new TeraBoxGatewayVerificationFailedError('Completion response contained no valid direct download URL');
+            }
+
+            logger.info(`[TeraBox Verification] direct_resolution_success`);
+
+            // Synthesise a resolvedFile so the download pipeline can continue normally
+            resolvedFile = {
+              fileName: completedFile.filename || completedFile.server_filename || 'terabox.file',
+              fileSize: Number(completedFile.size_bytes || completedFile.size || 0),
+              mimeType: undefined,
+              fsId: String(fsId || ''),
+              downloadUrl: extractedUrl,
+              source: 'terabox-gateway-verified',
+              sourceUrl: url,
+              headers: {},
+              isUnofficial: true,
+            };
+            // Continue to the download phase
+            break;
+          }
+
+          // All other resolution errors
           logger.error(`[Download] Attempt ${attempt}: Failed to resolve URL — ${resolveErr.message}`);
-          const isDeterministic = 
-            resolveErr.name === 'ProviderUnavailableError' || 
-            resolveErr.name === 'InvalidUrlError' || 
+          const isDeterministic =
+            resolveErr.name === 'ProviderUnavailableError' ||
+            resolveErr.name === 'InvalidUrlError' ||
             resolveErr.name === 'NotFoundError' ||
             resolveErr.name === 'TeraBoxVerificationRequiredError' ||
             resolveErr.name === 'TeraBoxAuthRequiredError' ||
@@ -454,15 +575,13 @@ export const initWorker = () => {
             resolveErr.name === 'TeraBoxMissingContextError' ||
             resolveErr.name === 'TeraBoxGatewaySessionExpiredError' ||
             resolveErr.name === 'TeraBoxGatewayVerificationFailedError' ||
-            resolveErr.name === 'TeraBoxGatewayVerificationSessionError' ||
             resolveErr.code === 'TERABOX_VERIFICATION_REQUIRED' ||
             resolveErr.code === 'TERABOX_AUTH_REQUIRED' ||
             resolveErr.code === 'TERABOX_AUTH_REJECTED' ||
             resolveErr.code === 'TERABOX_LINK_RESOLUTION_FAILED' ||
             resolveErr.code === 'TERABOX_GATEWAY_SESSION_EXPIRED' ||
-            resolveErr.code === 'TERABOX_GATEWAY_VERIFICATION_FAILED' ||
-            resolveErr.code === 'TERABOX_GATEWAY_VERIFICATION_REQUIRED';
-          
+            resolveErr.code === 'TERABOX_GATEWAY_VERIFICATION_FAILED';
+
           if (isDeterministic || attempt >= maxRetries) {
             throw resolveErr;
           }

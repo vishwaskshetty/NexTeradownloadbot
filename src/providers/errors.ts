@@ -2,6 +2,7 @@ export class ProviderError extends Error {
   constructor(message: string, public readonly code?: string, public readonly providerName?: string) {
     super(message);
     this.name = 'ProviderError';
+    Object.setPrototypeOf(this, new.target.prototype);
   }
 }
 
@@ -51,6 +52,7 @@ export class TeraBoxResolverError extends ProviderError {
   ) {
     super(message, code, 'TeraBox');
     this.name = 'TeraBoxResolverError';
+    Object.setPrototypeOf(this, new.target.prototype);
   }
 }
 
@@ -189,6 +191,7 @@ export class TeraBoxGatewayVerificationSessionError extends TeraBoxResolverError
   ) {
     super(message, stage, errno, sessionId, 'TERABOX_GATEWAY_VERIFICATION_REQUIRED');
     this.name = 'TeraBoxGatewayVerificationSessionError';
+    Object.setPrototypeOf(this, new.target.prototype);
   }
 }
 

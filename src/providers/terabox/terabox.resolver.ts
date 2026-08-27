@@ -89,6 +89,59 @@ export function normalizeGatewayUrl(rawUrl?: string): string | null {
   }
 }
 
+export function isInternalHostname(urlStr?: string): boolean {
+  if (!urlStr) return true;
+  try {
+    const u = new URL(urlStr);
+    const host = u.hostname.toLowerCase();
+    return (
+      host.endsWith('.railway.internal') ||
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host === '0.0.0.0' ||
+      host === '::1'
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function buildPublicVerificationUrl(sessionId: string, verificationUrlPathOrUrl?: string): string {
+  const envPublic = process.env.TERABOX_GATEWAY_PUBLIC_URL || (config as any).TERABOX_GATEWAY_PUBLIC_URL;
+  let publicBase = normalizeGatewayUrl(envPublic);
+  if (publicBase && isInternalHostname(publicBase)) {
+    publicBase = null;
+  }
+
+  if (!publicBase) {
+    const envInternal = process.env.TERABOX_GATEWAY_URL || config.TERABOX_GATEWAY_URL;
+    const normalizedGw = normalizeGatewayUrl(envInternal);
+    if (normalizedGw && !isInternalHostname(normalizedGw)) {
+      publicBase = normalizedGw;
+    }
+  }
+
+  if (!publicBase) {
+    publicBase = 'https://terabox-gateway-nex-production.up.railway.app';
+  }
+
+  if (verificationUrlPathOrUrl) {
+    if (verificationUrlPathOrUrl.startsWith('http://') || verificationUrlPathOrUrl.startsWith('https://')) {
+      if (!isInternalHostname(verificationUrlPathOrUrl)) {
+        return verificationUrlPathOrUrl;
+      }
+      try {
+        const u = new URL(verificationUrlPathOrUrl);
+        return `${publicBase}${u.pathname}${u.search}`;
+      } catch {}
+    } else if (verificationUrlPathOrUrl.startsWith('/')) {
+      return `${publicBase}${verificationUrlPathOrUrl}`;
+    }
+  }
+
+  return `${publicBase}/verification/${encodeURIComponent(sessionId)}`;
+}
+
 export interface TeraBoxVerificationSessionInfo {
   sessionId: string;
   verificationUrl: string;
@@ -2073,70 +2126,28 @@ export class TeraBoxResolver {
       const sessionId = gwRes?.session_id || resp.data?.session_id;
       let verificationUrl = gwRes?.verification_url || resp.data?.verification_url;
 
-      if (
+      const isVerification =
         httpStatus === 409 ||
         gwRes?.error === 'provider_verification_required' ||
-        gwRes?.status === 'provider_verification_required' ||
-        (sessionId && verificationUrl)
-      ) {
-        if (sessionId && verificationUrl) {
-          if (verificationUrl.startsWith('/')) {
-            verificationUrl = `${normalizedGwUrl}${verificationUrl}`;
-          }
+        gwRes?.status === 'verification_required' ||
+        gwRes?.requires_verification === true ||
+        gwRes?.errno === 400210 ||
+        gwRes?.errno === 400310 ||
+        String(gwRes?.message || gwRes?.errmsg || '').includes('verify_v2');
 
-          logger.info(`[TeraBox Verification] session_created`);
-          if (options?.onVerificationRequired) {
-            logger.info(`[TeraBox Verification] waiting_for_user`);
-            await options.onVerificationRequired({
-              sessionId,
-              verificationUrl,
-              shareCode,
-              fsId: targetFsId,
-            });
-
-            // Poll verification session
-            await this.pollGatewayVerificationSession(sessionId);
-
-            // Complete verification
-            const completeRes = await this.completeGatewayVerification(sessionId);
-            logger.info(`[TeraBox Verification] direct_link_received`);
-
-            const extractedCompleted =
-              extractTeraBoxDownloadUrl(completeRes) ||
-              extractTeraBoxDownloadUrl(completeRes?.download_link) ||
-              extractTeraBoxDownloadUrl(completeRes?.direct_link) ||
-              extractTeraBoxDownloadUrl(completeRes?.files);
-
-            if (!extractedCompleted) {
-              throw new TeraBoxGatewayLinkNotFoundError();
-            }
-
-            let finalCompletedUrl = extractedCompleted;
-            try {
-              const redirectRes = await this.resolveDlinkRedirect(extractedCompleted);
-              finalCompletedUrl = redirectRes.finalUrl;
-            } catch {}
-
-            const compFiles = Array.isArray(completeRes?.files) ? completeRes.files : [];
-            const compMatch =
-              compFiles.length > 0
-                ? (targetFsId ? compFiles.find((f: any) => String(f.fs_id) === String(targetFsId)) : null) ||
-                  compFiles[0]
-                : completeRes;
-            const resName = compMatch?.filename || compMatch?.server_filename || fileName;
-            const resSize = Number(compMatch?.size_bytes || compMatch?.size || fileSize) || fileSize;
-
-            return {
-              fileName: resName,
-              size: resSize > 0 ? resSize : undefined,
-              downloadUrl: finalCompletedUrl,
-              source: 'terabox-gateway',
-            };
-          } else {
-            throw new TeraBoxGatewayVerificationSessionError(sessionId, verificationUrl);
-          }
+      if (isVerification) {
+        if (sessionId) {
+          const publicUrl = buildPublicVerificationUrl(sessionId, verificationUrl);
+          logger.info(`[TeraBox Resolver] PROVIDER_VERIFICATION_REQUIRED sessionId=${String(sessionId).substring(0, 8)}***`);
+          throw new TeraBoxGatewayVerificationSessionError(
+            sessionId,
+            publicUrl,
+            `TeraBox requires manual browser verification. session_id=${sessionId}`,
+            'verification',
+            gwRes?.errno || 400210
+          );
         }
-        throw new TeraBoxGatewayAuthFailedError(`Gateway provider requires verification`, 'gateway', 400210);
+        throw new TeraBoxGatewayAuthFailedError(`Gateway provider requires verification (no session_id)`, 'gateway', gwRes?.errno || 400210);
       }
 
       if (httpStatus >= 500) {
@@ -2489,6 +2500,19 @@ export class TeraBoxResolver {
           break;
         }
       } catch (err: any) {
+        // CRITICAL: Gateway verification required — stop the cascade immediately.
+        // The worker must handle the user verification flow.
+        const isVerificationError =
+          err instanceof TeraBoxGatewayVerificationSessionError ||
+          err?.code === 'TERABOX_GATEWAY_VERIFICATION_REQUIRED' ||
+          err?.name === 'TeraBoxGatewayVerificationSessionError' ||
+          (typeof err === 'object' && err !== null && Boolean(err.sessionId) && Boolean(err.verificationUrl));
+
+        if (isVerificationError) {
+          logger.info(`[TeraBox Resolver] PROVIDER_VERIFICATION_REQUIRED sessionId=${err.sessionId || 'unknown'} — stopping cascade`);
+          throw err; // re-throw immediately, do not fall through to other strategies
+        }
+
         let status: StrategyResultStatus = 'FAILED';
         const errno = err.errno ?? err.code;
         const msg = err.message || '';
