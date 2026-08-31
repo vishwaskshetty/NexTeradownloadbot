@@ -140,6 +140,60 @@ describe('TeraBox Gateway Verification Architecture', () => {
         resolver.resolveViaTeraBoxGateway('testcode', '111')
       ).rejects.toBeInstanceOf(TeraBoxGatewayAuthFailedError);
     });
+
+    it('immediately converts errno 400210 into verification error without retrying', async () => {
+      config.TERABOX_GATEWAY_URL = 'http://localhost:5000';
+      const resolver = new TeraBoxResolver();
+
+      const mockGet = jest.fn().mockResolvedValue({
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+        data: { errno: 400210, errmsg: 'need verify_v2', session_id: 'sess_400210', verification_url: '/verify' },
+      });
+      axios.get = mockGet;
+
+      await expect(
+        resolver.resolveViaTeraBoxGateway('testcode', '222')
+      ).rejects.toBeInstanceOf(TeraBoxGatewayVerificationSessionError);
+
+      expect(mockGet).toHaveBeenCalledTimes(1);
+    });
+
+    it('immediately converts errno 400310 into verification error without retrying', async () => {
+      config.TERABOX_GATEWAY_URL = 'http://localhost:5000';
+      const resolver = new TeraBoxResolver();
+
+      const mockGet = jest.fn().mockResolvedValue({
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+        data: { errno: 400310, errmsg: 'need verify_v2', session_id: 'sess_400310', verification_url: '/verify' },
+      });
+      axios.get = mockGet;
+
+      await expect(
+        resolver.resolveViaTeraBoxGateway('testcode', '333')
+      ).rejects.toBeInstanceOf(TeraBoxGatewayVerificationSessionError);
+
+      expect(mockGet).toHaveBeenCalledTimes(1);
+    });
+
+    it('immediately converts errmsg containing need verify_v2 into verification error', async () => {
+      config.TERABOX_GATEWAY_URL = 'http://localhost:5000';
+      const resolver = new TeraBoxResolver();
+
+      const mockGet = jest.fn().mockResolvedValue({
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+        data: { errmsg: 'Authentication failed: need verify_v2', session_id: 'sess_v2', verification_url: '/verify' },
+      });
+      axios.get = mockGet;
+
+      await expect(
+        resolver.resolveViaTeraBoxGateway('testcode', '444')
+      ).rejects.toBeInstanceOf(TeraBoxGatewayVerificationSessionError);
+
+      expect(mockGet).toHaveBeenCalledTimes(1);
+    });
   });
 
   // REQ 5 & 12: Resolver cascade stops immediately on verification

@@ -28,6 +28,7 @@ import {
   TeraBoxGatewayVerificationFailedError,
 } from '../errors';
 import { logger } from '../../utils/logger';
+import { teraFlyResolver } from './terafly.resolver';
 
 // ── Cookie & Session Management ──────────────────────────────────────────────
 
@@ -794,6 +795,22 @@ export function validateDownloadContext(context: {
   }
 }
 
+export function isVerificationError(err: any): boolean {
+  if (!err) return false;
+  return (
+    err instanceof TeraBoxGatewayVerificationSessionError ||
+    err instanceof TeraBoxVerificationRequiredError ||
+    err?.code === 'TERABOX_GATEWAY_VERIFICATION_REQUIRED' ||
+    err?.code === 'TERABOX_VERIFICATION_REQUIRED' ||
+    err?.name === 'TeraBoxGatewayVerificationSessionError' ||
+    err?.name === 'TeraBoxVerificationRequiredError' ||
+    err?.errno === 400210 ||
+    err?.errno === 400310 ||
+    String(err?.message || err?.errmsg || '').includes('verify_v2') ||
+    (typeof err === 'object' && err !== null && (Boolean(err.sessionId) || err.requires_verification === true || err.status === 'verification_required'))
+  );
+}
+
 // ── Multi-tier Resolver Engine ───────────────────────────────────────────────
 
 export class TeraBoxResolver {
@@ -884,6 +901,34 @@ export class TeraBoxResolver {
           `errno=${resErrno ?? 'NONE'} errmsg="${resErrmsg || ''}"`
         );
 
+        if (
+          resErrno === 400210 ||
+          resErrno === 400310 ||
+          String(resErrmsg || '').includes('verify_v2') ||
+          resData?.requires_verification === true ||
+          resData?.status === 'verification_required' ||
+          resData?.error === 'provider_verification_required'
+        ) {
+          const sessionId = resData?.session_id || resData?.data?.session_id;
+          const verificationUrl = resData?.verification_url || resData?.data?.verification_url;
+          if (sessionId) {
+            const publicUrl = buildPublicVerificationUrl(sessionId, verificationUrl);
+            logger.info(`[TeraBox Resolver] PROVIDER_VERIFICATION_REQUIRED sessionId=${String(sessionId).substring(0, 8)}***`);
+            throw new TeraBoxGatewayVerificationSessionError(
+              sessionId,
+              publicUrl,
+              `TeraBox requires manual browser verification. session_id=${sessionId}`,
+              'verification',
+              resErrno || 400210
+            );
+          }
+          throw new TeraBoxVerificationRequiredError(
+            `TeraBox verification required: ${resErrmsg || 'need verify_v2'}`,
+            'verification',
+            resErrno || 400210
+          );
+        }
+
         return response.data;
       } catch (err: any) {
         clearTimeout(timer);
@@ -893,21 +938,27 @@ export class TeraBoxResolver {
         const status = isAxiosErr ? err.response?.status : undefined;
         const resData = isAxiosErr ? err.response?.data : undefined;
         const resErrno = resData?.errno ?? resData?.data?.errno;
+        const resErrmsg = typeof resData?.errmsg === 'string' ? resData.errmsg : (typeof resData?.data?.errmsg === 'string' ? resData.data.errmsg : undefined);
 
         logger.warn(
           `[TeraBox HTTP] Error: method=${options.method || 'GET'} host=${parsedUrl.hostname} path=${parsedUrl.pathname} ` +
           `status=${status ?? 'NETWORK_ERROR'} errno=${resErrno ?? 'NONE'} message="${err.message}"`
         );
 
-        // Do NOT retry deterministic client errors or provider verification errors
-        if (
-          (status && status >= 400 && status < 500) ||
+        const isVerif =
+          status === 409 ||
           resErrno === 400310 ||
           resErrno === 400210 ||
+          String(resErrmsg || err.message || '').includes('verify_v2') ||
+          resData?.requires_verification === true ||
+          resData?.status === 'verification_required' ||
+          err instanceof TeraBoxGatewayVerificationSessionError ||
           err instanceof TeraBoxVerificationRequiredError ||
           err instanceof TeraBoxAuthRejectedError ||
-          err instanceof TeraBoxAuthRequiredError
-        ) {
+          err instanceof TeraBoxAuthRequiredError;
+
+        // Do NOT retry deterministic client errors or provider verification errors
+        if ((status && status >= 400 && status < 500) || isVerif) {
           throw err;
         }
 
@@ -1204,6 +1255,7 @@ export class TeraBoxResolver {
       }
       logger.info(`[TeraBox] Stage 3: Extracting jsToken -> ${jsToken ? 'YES' : 'NO'}, dpLogId -> ${dpLogId ? 'YES' : 'NO'}`);
     } catch (e: any) {
+      if (isVerificationError(e)) throw e;
       logger.warn(`[TeraBox] Stage 2/3 session creation warning: ${e.message}`);
     }
 
@@ -1232,6 +1284,7 @@ export class TeraBoxResolver {
           }
         }
       } catch (e: any) {
+        if (isVerificationError(e)) throw e;
         logger.warn(`[TeraBox] Configured gateway metadata resolution failed: ${e.message}`);
       }
     }
@@ -1247,7 +1300,9 @@ export class TeraBoxResolver {
         if (data && data.errno === 0 && Array.isArray(data.list)) {
           fileList = data.list;
         }
-      } catch {}
+      } catch (e: any) {
+        if (isVerificationError(e)) throw e;
+      }
     }
 
     // Strategy 3: Authenticated shorturlinfo with session context
@@ -1279,7 +1334,9 @@ export class TeraBoxResolver {
           sign = data.sign;
           timestamp = data.timestamp;
         }
-      } catch {}
+      } catch (e: any) {
+        if (isVerificationError(e)) throw e;
+      }
 
       // Fallback refresh once if needed
       if (fileList.length === 0) {
@@ -1326,7 +1383,9 @@ export class TeraBoxResolver {
             sign = retryData.sign;
             timestamp = retryData.timestamp;
           }
-        } catch {}
+        } catch (e: any) {
+          if (isVerificationError(e)) throw e;
+        }
       }
 
       // Fallback share/list for file discovery
@@ -2104,6 +2163,8 @@ export class TeraBoxResolver {
     let responseContentType = 'application/json';
 
     try {
+      const startTime = Date.now();
+      logger.info('[TeraBox Timing] gateway_request_start');
       logger.info(
         `[TeraBox Gateway] gatewayConfigured=YES gatewayHost=${gatewayHost} gatewayEndpoint=${endpoint} requestStarted=YES`
       );
@@ -2120,6 +2181,8 @@ export class TeraBoxResolver {
       });
 
       httpStatus = resp.status;
+      const elapsedMs = Date.now() - startTime;
+      logger.info(`[TeraBox Timing] gateway_response status=${httpStatus} elapsedMs=${elapsedMs}`);
       responseContentType = String(resp.headers['content-type'] || 'unknown');
       gwRes = resp.data;
 
@@ -2136,6 +2199,8 @@ export class TeraBoxResolver {
         String(gwRes?.message || gwRes?.errmsg || '').includes('verify_v2');
 
       if (isVerification) {
+        logger.info(`[TeraBox Timing] verification_detected elapsedMs=${elapsedMs}`);
+        logger.info('[TeraBox Timing] verification_error_propagated');
         if (sessionId) {
           const publicUrl = buildPublicVerificationUrl(sessionId, verificationUrl);
           logger.info(`[TeraBox Resolver] PROVIDER_VERIFICATION_REQUIRED sessionId=${String(sessionId).substring(0, 8)}***`);
@@ -2454,7 +2519,48 @@ export class TeraBoxResolver {
     fsId?: string | number,
     options?: { onVerificationRequired?: (info: TeraBoxVerificationSessionInfo) => Promise<void> }
   ): Promise<TeraBoxResolvedFile> {
-    const shareMetadata = await this.getShareMetadata(url);
+    // Primary Route: TeraFly external source adapter
+    if (teraFlyResolver.isEnabled()) {
+      try {
+        const teraFlyRes = await teraFlyResolver.resolve(url);
+        if (teraFlyRes && teraFlyRes.downloadUrl) {
+          logger.info(`[TeraBox] Direct URL obtained successfully (Source: terafly)`);
+          return {
+            fileName: teraFlyRes.fileName || 'terabox.file',
+            fileSize: teraFlyRes.size || 0,
+            mimeType: 'video/mp4',
+            fsId: String(fsId || ''),
+            downloadUrl: teraFlyRes.downloadUrl,
+            source: 'terafly',
+            sourceUrl: url,
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+              'Referer': 'https://www.terafly.in/',
+              'Accept': '*/*',
+            },
+            isUnofficial: true,
+          };
+        }
+      } catch (teraFlyErr: any) {
+        logger.warn(`[TeraFly] Resolution failed: ${teraFlyErr.message}`);
+        // Do NOT fall through into the legacy TeraBox authentication/verification cascade!
+        if (teraFlyErr instanceof TeraBoxDownloadUrlError || teraFlyErr instanceof TeraBoxResolverError) {
+          throw teraFlyErr;
+        }
+        throw new TeraBoxLinkResolutionFailedError(`TeraFly resolution failed: ${teraFlyErr.message}`);
+      }
+    }
+
+    let shareMetadata: TeraBoxShareMetadata;
+    try {
+      shareMetadata = await this.getShareMetadata(url);
+    } catch (err: any) {
+      if (isVerificationError(err)) {
+        logger.info(`[TeraBox Resolver] PROVIDER_VERIFICATION_REQUIRED sessionId=${err.sessionId || 'unknown'} — stopping cascade`);
+        throw err;
+      }
+      throw err;
+    }
     const fileList = shareMetadata.fileList;
 
     let file: TeraBoxFileItem | undefined;
@@ -2480,6 +2586,7 @@ export class TeraBoxResolver {
     // Multi-tier strategy order starting with primary Gateway strategy
     const strategies = [
       { name: 'gateway', fn: () => this.resolveWithGateway(targetFsId, shareMetadata, options) },
+      { name: 'terafly', fn: () => teraFlyResolver.resolve(url) },
       { name: 'seiya-authenticated-download', fn: () => this.resolveWithAuthenticatedDownloadFlow(targetFsId, shareMetadata) },
       { name: 'terabox-api-reference', fn: () => this.resolveWithTeraboxApiReference(targetFsId, shareMetadata) },
       { name: 'pahadi10-reference', fn: () => this.resolveWithPahadi10Flow(targetFsId, shareMetadata) },

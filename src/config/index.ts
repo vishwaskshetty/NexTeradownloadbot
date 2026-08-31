@@ -39,6 +39,9 @@ const envSchema = z.object({
   TERABOX_GATEWAY_URL: z.string().optional(),
   TERABOX_GATEWAY_PUBLIC_URL: z.string().optional(),
   TERABOX_GATEWAY_TIMEOUT_MS: z.coerce.number().default(15000),
+  // TeraFly optional resolver configuration
+  TERABOX_TERAFLY_ENABLED: z.coerce.boolean().default(false),
+  TERABOX_TERAFLY_TIMEOUT_MS: z.coerce.number().default(15000),
   // Diskwala Official API credentials (optional)
   DISKWALA_API_KEY: z.string().optional(),
 });
@@ -83,6 +86,7 @@ if (process.env.NODE_ENV !== 'test') {
   if (isGatewayConfigured) {
     console.log(`[TeraBox Gateway] URL valid: ${/^https?:\/\//i.test(config.TERABOX_GATEWAY_URL!.trim()) ? 'YES' : 'NO'}`);
   }
+  console.log(`[TeraFly] enabled=${config.TERABOX_TERAFLY_ENABLED ? 'YES' : 'NO'}`);
 }
 
 

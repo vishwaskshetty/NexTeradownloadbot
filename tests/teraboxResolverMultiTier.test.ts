@@ -31,6 +31,10 @@ import {
 import { config } from '../src/config';
 
 describe('TeraBox Authenticated Multi-Tier Resolver Suite', () => {
+  beforeEach(() => {
+    (config as any).TERABOX_TERAFLY_ENABLED = false;
+  });
+
   // 1. NDUS normalization
   describe('1. NDUS normalization', () => {
     it('normalizes various raw token formats and prefixes', () => {

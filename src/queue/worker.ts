@@ -425,6 +425,7 @@ export const initWorker = () => {
             (typeof resolveErr === 'object' && resolveErr !== null && Boolean(resolveErr.sessionId) && Boolean(resolveErr.verificationUrl));
 
           if (isVerificationError) {
+            logger.info('[TeraBox Timing] worker_verification_started');
             const sessionId = String(resolveErr.sessionId);
             const verificationUrl = buildPublicVerificationUrl(sessionId, resolveErr.verificationUrl);
 
@@ -467,6 +468,7 @@ export const initWorker = () => {
             const pollStart = Date.now();
             let verificationCompleted = false;
 
+            logger.info('[TeraBox Timing] verification_poll_started');
             logger.info(`[TeraBox Verification] polling_started sessionId=${sessionId.substring(0, 8)}***`);
 
             while (Date.now() - pollStart < pollTimeoutMs) {
