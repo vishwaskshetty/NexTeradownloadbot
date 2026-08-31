@@ -9,6 +9,7 @@ import { getVerificationPromptKeyboard } from '../keyboards/mainKeyboard';
 import { handleError } from '../../utils/errorHandler';
 import { logger } from '../../utils/logger';
 import { config } from '../../config';
+import { TeraBoxGatewayVerificationSessionError } from '../../providers/errors';
 
 function formatBytes(bytes: number | bigint): string {
   const num = Number(bytes);
@@ -90,9 +91,22 @@ export const messageHandler = async (ctx: Context) => {
       try {
         shareMetadata = await adapterInstance.getShareMetadata(text);
       } catch (metaErr: any) {
-        await jobService.failJob(job.id, metaErr?.message || 'Metadata extraction failed');
-        await ctx.reply(metaErr?.message || '❌ Unable to access this shared file.', { parse_mode: 'Markdown' });
-        return;
+        const isVerif =
+          metaErr instanceof TeraBoxGatewayVerificationSessionError ||
+          metaErr?.code === 'TERABOX_GATEWAY_VERIFICATION_REQUIRED' ||
+          metaErr?.name === 'TeraBoxGatewayVerificationSessionError' ||
+          metaErr?.errno === 400210 ||
+          metaErr?.errno === 400310 ||
+          String(metaErr?.message || metaErr?.errmsg || '').includes('verify_v2');
+
+        if (!isVerif) {
+          const safeErrorMsg = typeof metaErr?.message === 'string'
+            ? metaErr.message.replace(/[*_`[\]()]/g, '')
+            : '❌ Unable to access this shared file.';
+          await jobService.failJob(job.id, safeErrorMsg);
+          await ctx.reply(safeErrorMsg);
+          return;
+        }
       }
     }
 
@@ -106,7 +120,8 @@ export const messageHandler = async (ctx: Context) => {
       const keyboardButtons: any[] = [];
 
       fileList.slice(0, 10).forEach((file: any, idx: number) => {
-        const fName = file.server_filename || file.filename || `File ${idx + 1}`;
+        const rawName = file.server_filename || file.filename || `File ${idx + 1}`;
+        const fName = String(rawName).replace(/[`*_]/g, ' ');
         const fSize = file.size ? formatBytes(file.size) : 'Unknown size';
         listText += `${idx + 1}. 📄 \`${fName}\` (${fSize})\n`;
 

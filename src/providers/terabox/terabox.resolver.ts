@@ -2169,7 +2169,7 @@ export class TeraBoxResolver {
         `[TeraBox Gateway] gatewayConfigured=YES gatewayHost=${gatewayHost} gatewayEndpoint=${endpoint} requestStarted=YES`
       );
 
-      const timeoutMs = config.TERABOX_GATEWAY_TIMEOUT_MS || 15000;
+      const timeoutMs = config.TERABOX_GATEWAY_TIMEOUT_MS || 35000;
       const resp = await axios.get(endpoint, {
         params,
         timeout: timeoutMs,

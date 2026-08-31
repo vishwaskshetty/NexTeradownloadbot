@@ -449,8 +449,14 @@ export const initWorker = () => {
                 ],
               },
             };
-            await updateStatusMessage(verificationMsg, keyboard);
-            logger.info(`[TeraBox Verification] user_prompt_sent`);
+            try {
+              logger.info('[TeraBox Verification] telegram_message_send_started');
+              await updateStatusMessage(verificationMsg, keyboard);
+              logger.info('[TeraBox Verification] telegram_message_send_success');
+              logger.info(`[TeraBox Verification] user_prompt_sent`);
+            } catch (tgSendErr: any) {
+              logger.error(`[TeraBox Verification] telegram_message_send_failed reason="${tgSendErr.message}"`);
+            }
 
             // Poll gateway session until completed/expired, then call /complete
             const normalizedGwUrl = normalizeGatewayUrl(config.TERABOX_GATEWAY_URL);
